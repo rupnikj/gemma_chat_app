@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math'; // Added for Random
 import 'package:flutter/foundation.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma/core/chat.dart'; // Explicit import for InferenceChat
@@ -20,6 +21,8 @@ class ChatService {
   static const double _defaultTemperature = 1.0;
   static const int _defaultTopK = 64;
   static const double _defaultTopP = 0.95;
+  static const int _defaultRandomSeed = 1;
+  static const bool _defaultUseFixedRandomSeed = false;
 
   final ValueNotifier<bool> isModelReady = ValueNotifier<bool>(false);
   final ValueNotifier<String?> currentModelPath = ValueNotifier<String?>(null);
@@ -33,6 +36,12 @@ class ChatService {
   );
   final ValueNotifier<int> topK = ValueNotifier<int>(_defaultTopK);
   final ValueNotifier<double> topP = ValueNotifier<double>(_defaultTopP);
+  final ValueNotifier<int?> randomSeed = ValueNotifier<int?>(
+    _defaultRandomSeed,
+  );
+  final ValueNotifier<bool> useFixedRandomSeed = ValueNotifier<bool>(
+    _defaultUseFixedRandomSeed,
+  );
 
   // SharedPreferences keys
   static const String _modelPathKey = 'gemma_model_path';
@@ -41,6 +50,8 @@ class ChatService {
   static const String _temperatureKey = 'gemma_temperature';
   static const String _topKKey = 'gemma_top_k';
   static const String _topPKey = 'gemma_top_p';
+  static const String _randomSeedKey = 'gemma_random_seed';
+  static const String _useFixedRandomSeedKey = 'gemma_use_fixed_random_seed';
 
   final ModelType _modelType =
       ModelType.gemmaIt; // Default, can be made configurable
@@ -60,6 +71,9 @@ class ChatService {
     temperature.value = prefs.getDouble(_temperatureKey) ?? _defaultTemperature;
     topK.value = prefs.getInt(_topKKey) ?? _defaultTopK;
     topP.value = prefs.getDouble(_topPKey) ?? _defaultTopP;
+    randomSeed.value = prefs.getInt(_randomSeedKey) ?? _defaultRandomSeed;
+    useFixedRandomSeed.value =
+        prefs.getBool(_useFixedRandomSeedKey) ?? _defaultUseFixedRandomSeed;
 
     final String? savedPath = prefs.getString(_modelPathKey);
     if (savedPath != null && savedPath.isNotEmpty) {
@@ -160,6 +174,36 @@ class ChatService {
     }
   }
 
+  Future<void> updateRandomSeedSettings({int? newSeed, bool? useFixed}) async {
+    bool needsRecreate = false;
+    final prefs = await _prefs;
+
+    if (useFixed != null && useFixedRandomSeed.value != useFixed) {
+      useFixedRandomSeed.value = useFixed;
+      await prefs.setBool(_useFixedRandomSeedKey, useFixed);
+      needsRecreate = true;
+    }
+
+    if (newSeed != null && randomSeed.value != newSeed) {
+      if (newSeed < 1) {
+        // Assuming seed should be positive, adjust if necessary
+        throw ArgumentError('Random seed must be >= 1');
+      }
+      randomSeed.value = newSeed;
+      await prefs.setInt(_randomSeedKey, newSeed);
+      needsRecreate = true;
+    } else if (useFixed == false) {
+      // If switching to dynamic seed, clear the stored fixed seed value
+      // Or set it to default; here we'll clear for explicitness
+      // await prefs.remove(_randomSeedKey);
+      // randomSeed.value = null; // Or _defaultRandomSeed if preferred when fixed is off
+    }
+
+    if (needsRecreate && _inferenceModel != null) {
+      await _recreateChat();
+    }
+  }
+
   Future<void> _recreateChat() async {
     if (_inferenceModel == null) {
       print("Cannot recreate chat: InferenceModel is null.");
@@ -179,12 +223,20 @@ class ChatService {
 
     print('Recreating chat with new parameters...');
     try {
+      final currentSeed =
+          useFixedRandomSeed.value
+              ? randomSeed.value
+              : Random().nextInt(1 << 30); // Generate a random int if not fixed
+
       _chat = await _inferenceModel!.createChat(
         temperature: temperature.value,
         topK: topK.value,
         topP: topP.value,
+        randomSeed: currentSeed ?? _defaultRandomSeed, // Use default if null
       );
-      print('Chat recreated successfully with new parameters.');
+      print(
+        'Chat recreated successfully. Seed: $currentSeed, Temp: ${temperature.value}, TopK: ${topK.value}, TopP: ${topP.value}',
+      );
     } catch (e) {
       print("Error during _inferenceModel.createChat: $e");
       rethrow;
@@ -264,6 +316,12 @@ class ChatService {
           temperature: temperature.value,
           topK: topK.value,
           topP: topP.value,
+          randomSeed:
+              useFixedRandomSeed.value
+                  ? randomSeed.value ?? _defaultRandomSeed
+                  : Random().nextInt(
+                    1 << 30,
+                  ), // Generate a random int if not fixed
         );
         print('InferenceChat session created.');
 
@@ -313,16 +371,24 @@ class ChatService {
   }
 
   Future<void> restartChat() async {
-    if (_chat != null) {
-      print('Restarting chat session (clearing history).');
-      await _chat!.clearHistory();
-      // clearHistory in flutter_gemma's InferenceChat should re-initialize the session.
-      print('Chat history cleared.');
-    } else {
-      print('Chat session not initialized, cannot restart.');
-      // Optionally, if _inferenceModel exists, you could recreate _chat here
-      // if a model is loaded but the chat object was somehow lost.
-      // if (_inferenceModel != null) { ... _chat = await _inferenceModel.createChat(...) ... }
+    if (_inferenceModel == null) {
+      print(
+        'Cannot restart chat: InferenceModel is null. Model needs to be loaded.',
+      );
+      // Optionally, throw an error or notify the user that the model isn't loaded.
+      // For example, you could throw an Exception:
+      // throw Exception("Model not loaded. Cannot restart chat.");
+      return; // Or handle this scenario appropriately in the UI
+    }
+
+    print('Restarting chat session by recreating it...');
+    try {
+      await _recreateChat(); // This will handle seed generation correctly.
+      print('Chat session restarted successfully by recreating.');
+    } catch (e) {
+      print('Error during chat restart (recreation): $e');
+      // Rethrow or handle as appropriate for your app's error handling strategy
+      rethrow;
     }
   }
 

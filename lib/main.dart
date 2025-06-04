@@ -80,7 +80,15 @@ class _ChatScreenState extends State<ChatScreen> {
       print("Error initializing ChatService: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error initializing: ${e.toString()}')),
+          SnackBar(
+            content: Text('Error initializing: ${e.toString()}'),
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.only(
+              bottom: 90.0, // Added margin
+              left: 16.0,
+              right: 16.0,
+            ),
+          ),
         );
       }
     } finally {
@@ -137,9 +145,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (!_chatService.isModelReady.value) {
       print("[ChatScreen] _handleSendMessage: Model not ready. Exiting.");
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Model is not ready yet.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Model is not ready yet.'),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: 90.0, // Added margin
+            left: 16.0,
+            right: 16.0,
+          ),
+        ),
+      );
       return;
     }
     if (_isSending) {
@@ -203,7 +219,15 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error sending message: ${e.toString()}')),
+          SnackBar(
+            content: Text('Error sending message: ${e.toString()}'),
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.only(
+              bottom: 90.0, // Added margin
+              left: 16.0,
+              right: 16.0,
+            ),
+          ),
         );
       }
     } finally {
@@ -228,7 +252,15 @@ class _ChatScreenState extends State<ChatScreen> {
       print("Error picking model: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error picking model: ${e.toString()}')),
+          SnackBar(
+            content: Text('Error picking model: ${e.toString()}'),
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.only(
+              bottom: 90.0, // Added margin
+              left: 16.0,
+              right: 16.0,
+            ),
+          ),
         );
       }
     }
@@ -237,7 +269,15 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _handleRestartChat() async {
     if (!_chatService.isModelReady.value) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Model not loaded, cannot restart chat.')),
+        const SnackBar(
+          content: Text('Model not loaded, cannot restart chat.'),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: 90.0, // Added margin
+            left: 16.0,
+            right: 16.0,
+          ),
+        ),
       );
       return;
     }
@@ -252,6 +292,12 @@ class _ChatScreenState extends State<ChatScreen> {
       const SnackBar(
         content: Text('Chat restarted.'),
         duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.only(
+          bottom: 90.0, // Added margin
+          left: 16.0,
+          right: 16.0,
+        ),
       ),
     );
   }

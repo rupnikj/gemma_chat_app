@@ -16,6 +16,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _temperatureController;
   late TextEditingController _topKController;
   late TextEditingController _topPController;
+  late TextEditingController _randomSeedController;
 
   bool _isLoading = false;
 
@@ -37,6 +38,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _topPController = TextEditingController(
       text: _chatService.topP.value.toStringAsFixed(2),
     );
+    _randomSeedController = TextEditingController(
+      text: _chatService.randomSeed.value?.toString() ?? '1',
+    );
   }
 
   @override
@@ -45,6 +49,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _temperatureController.dispose();
     _topKController.dispose();
     _topPController.dispose();
+    _randomSeedController.dispose();
     super.dispose();
   }
 
@@ -119,10 +124,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _updateRandomSeedSettings() async {
+    if (_isLoading) return;
+
+    final useFixed = _chatService.useFixedRandomSeed.value;
+    int? seedValue;
+
+    if (useFixed) {
+      seedValue = int.tryParse(_randomSeedController.text);
+      if (seedValue == null || seedValue < 1) {
+        _showError('Random seed must be a positive integer (>= 1).');
+        return;
+      }
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      await _chatService.updateRandomSeedSettings(
+        newSeed: useFixed ? seedValue : null, // Pass seed only if fixed is used
+        useFixed: useFixed, // Pass the current state of the checkbox
+      );
+      _showSuccess('Random seed settings updated. Chat session recreated.');
+    } catch (e) {
+      _showError('Error updating random seed: $e');
+    } finally {
+      // Update controller text in case the service modified the value (e.g. default)
+      if (mounted && useFixed) {
+        _randomSeedController.text =
+            _chatService.randomSeed.value?.toString() ?? '1';
+      } else if (mounted && !useFixed) {
+        // Optionally clear or reset the text field when fixed seed is disabled
+        // _randomSeedController.text = '1';
+      }
+      setState(() => _isLoading = false);
+    }
+  }
+
   void _showError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.red),
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 90.0, left: 16.0, right: 16.0),
+      ),
     );
   }
 
@@ -133,6 +179,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Text(message),
         backgroundColor: Colors.green,
         duration: const Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 90.0, left: 16.0, right: 16.0),
       ),
     );
   }
@@ -332,6 +380,122 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
             const SizedBox(height: 16),
 
+            // Random Seed Settings Section
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Random Seed Settings',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Controls the seed for chat response generation. Recreates chat session.',
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Colors.blueGrey),
+                    ),
+                    const SizedBox(height: 16),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _chatService.useFixedRandomSeed,
+                      builder: (context, useFixed, child) {
+                        return CheckboxListTile(
+                          title: const Text('Use Fixed Random Seed'),
+                          value: useFixed,
+                          onChanged:
+                              _isLoading
+                                  ? null
+                                  : (bool? newValue) async {
+                                    if (newValue == null) return;
+                                    // Immediately update the service state for the checkbox
+                                    // The text field update will be handled by _updateRandomSeedSettings
+                                    setState(() => _isLoading = true);
+                                    try {
+                                      await _chatService
+                                          .updateRandomSeedSettings(
+                                            useFixed: newValue,
+                                          );
+                                      if (newValue == false) {
+                                        // If disabling fixed seed, we might want to clear/reset the input field
+                                        // _randomSeedController.text = '1';
+                                      }
+                                      _showSuccess(
+                                        'Fixed seed setting updated.',
+                                      );
+                                    } catch (e) {
+                                      _showError(
+                                        'Error updating fixed seed setting: $e',
+                                      );
+                                    } finally {
+                                      setState(() => _isLoading = false);
+                                    }
+                                  },
+                          controlAffinity: ListTileControlAffinity.leading,
+                          activeColor: Theme.of(context).colorScheme.primary,
+                        );
+                      },
+                    ),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _chatService.useFixedRandomSeed,
+                      builder: (context, useFixed, child) {
+                        if (!useFixed) {
+                          return const SizedBox.shrink(); // Hide TextField if not using fixed seed
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(
+                            top: 8.0,
+                            left: 16.0,
+                            right: 16.0,
+                          ),
+                          child: TextField(
+                            controller: _randomSeedController,
+                            decoration: const InputDecoration(
+                              labelText: 'Random Seed',
+                              helperText:
+                                  'Integer >= 1, used if checkbox is ticked',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: TextInputType.number,
+                            enabled: !_isLoading && useFixed,
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed:
+                            _isLoading ? null : _updateRandomSeedSettings,
+                        child:
+                            _isLoading
+                                ? const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                    SizedBox(width: 8),
+                                    Text('Updating Seed...'),
+                                  ],
+                                )
+                                : const Text('Apply Random Seed Settings'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
             // Current Values Display
             Card(
               child: Padding(
@@ -376,6 +540,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       valueListenable: _chatService.topP,
                       builder: (context, topP, child) {
                         return Text('TopP: ${topP.toStringAsFixed(2)}');
+                      },
+                    ),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _chatService.useFixedRandomSeed,
+                      builder: (context, useFixed, child) {
+                        return ValueListenableBuilder<int?>(
+                          valueListenable: _chatService.randomSeed,
+                          builder: (context, seed, child) {
+                            final seedText =
+                                useFixed
+                                    ? (seed?.toString() ?? 'N/A')
+                                    : 'Dynamic (new each session)';
+                            return Text(
+                              'Random Seed: $seedText (Fixed: $useFixed)',
+                            );
+                          },
+                        );
                       },
                     ),
                   ],
