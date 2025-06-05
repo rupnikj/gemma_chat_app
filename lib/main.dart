@@ -51,6 +51,9 @@ class _ChatScreenState extends State<ChatScreen> {
   List<Message> _messages = [];
   bool _isSending = false;
   bool _isModelInitializing = true; // To show loading initially
+  bool _shouldAutoScroll = true; // Track if auto-scroll is enabled
+  bool _isProgrammaticallyScrolling = false; // Track programmatic scrolling
+  double _lastScrollPosition = 0.0; // Track last scroll position
 
   late ChatService _chatService;
 
@@ -63,7 +66,41 @@ class _ChatScreenState extends State<ChatScreen> {
     _chatService.isModelReady.addListener(_onModelStateChanged);
     _chatService.currentModelPath.addListener(_onModelStateChanged);
 
+    // Add scroll listener to detect manual scrolling
+    _scrollController.addListener(_onScroll);
+
     _initializeChatService();
+  }
+
+  // Handle scroll events to detect manual scrolling
+  void _onScroll() {
+    if (!_scrollController.hasClients || _isProgrammaticallyScrolling) return;
+
+    final currentScroll = _scrollController.position.pixels;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+
+    // Check if user is scrolling up (manual scroll)
+    final isScrollingUp = currentScroll < _lastScrollPosition;
+
+    // Very small threshold - essentially at the very bottom
+    const threshold = 5.0;
+    final isAtBottom = (maxScroll - currentScroll) <= threshold;
+
+    if (isScrollingUp && _shouldAutoScroll) {
+      // User is scrolling up - disable auto-scroll immediately
+      setState(() {
+        _shouldAutoScroll = false;
+      });
+      print("[ChatScreen] Upward scroll detected - disabling auto-scroll");
+    } else if (isAtBottom && !_shouldAutoScroll) {
+      // User scrolled back to bottom - re-enable auto-scroll
+      setState(() {
+        _shouldAutoScroll = true;
+      });
+      print("[ChatScreen] Scrolled to bottom - enabling auto-scroll");
+    }
+
+    _lastScrollPosition = currentScroll;
   }
 
   Future<void> _initializeChatService() async {
@@ -119,6 +156,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _textController.dispose();
+    _scrollController.removeListener(_onScroll); // Remove scroll listener
     _scrollController.dispose();
     _chatService.isModelReady.removeListener(_onModelStateChanged);
     _chatService.currentModelPath.removeListener(_onModelStateChanged);
@@ -126,12 +164,33 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollToBottom() {
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
+    if (_scrollController.hasClients && _shouldAutoScroll) {
+      _isProgrammaticallyScrolling = true; // Flag to ignore scroll events
+      _scrollController
+          .animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          )
+          .then((_) {
+            // Re-enable scroll detection after animation completes
+            _isProgrammaticallyScrolling = false;
+          });
+    }
+  }
+
+  // Alternative: Use jumpTo for instant scrolling during token streaming
+  void _jumpToBottom() {
+    if (_scrollController.hasClients && _shouldAutoScroll) {
+      _isProgrammaticallyScrolling = true;
+      final targetPosition = _scrollController.position.maxScrollExtent;
+      _scrollController.jumpTo(targetPosition);
+      _lastScrollPosition = targetPosition; // Update our tracking
+
+      // Use a very short delay
+      Future.delayed(const Duration(milliseconds: 5), () {
+        _isProgrammaticallyScrolling = false;
+      });
     }
   }
 
@@ -177,6 +236,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _isSending = true;
       _messages.add(userMessage);
       _messages.add(aiPlaceholderMessage);
+      _shouldAutoScroll =
+          true; // Always enable auto-scroll when sending new message
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
@@ -199,9 +260,8 @@ class _ChatScreenState extends State<ChatScreen> {
               "[ChatScreen] _handleSendMessage: Stream token received: '$token'",
             );
           });
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _scrollToBottom(),
-          );
+          // Use jumpTo for smoother experience during token streaming
+          WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
         }
       }
       if (!receivedToken) {
