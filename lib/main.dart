@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io' show Platform;
 import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
@@ -119,12 +121,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error initializing: ${e.toString()}'),
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.only(
-              bottom: 90.0, // Added margin
-              left: 16.0,
-              right: 16.0,
-            ),
+            behavior: SnackBarBehavior.fixed,
           ),
         );
       }
@@ -207,12 +204,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Model is not ready yet.'),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: 90.0, // Added margin
-            left: 16.0,
-            right: 16.0,
-          ),
+          behavior: SnackBarBehavior.fixed,
         ),
       );
       return;
@@ -281,12 +273,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error sending message: ${e.toString()}'),
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.only(
-              bottom: 90.0, // Added margin
-              left: 16.0,
-              right: 16.0,
-            ),
+            behavior: SnackBarBehavior.fixed,
           ),
         );
       }
@@ -314,12 +301,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error picking model: ${e.toString()}'),
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.only(
-              bottom: 90.0, // Added margin
-              left: 16.0,
-              right: 16.0,
-            ),
+            behavior: SnackBarBehavior.fixed,
           ),
         );
       }
@@ -331,12 +313,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Model not loaded, cannot restart chat.'),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: 90.0, // Added margin
-            left: 16.0,
-            right: 16.0,
-          ),
+          behavior: SnackBarBehavior.fixed,
         ),
       );
       return;
@@ -352,14 +329,36 @@ class _ChatScreenState extends State<ChatScreen> {
       const SnackBar(
         content: Text('Chat restarted.'),
         duration: Duration(seconds: 1),
-        behavior: SnackBarBehavior.floating,
-        margin: EdgeInsets.only(
-          bottom: 90.0, // Added margin
-          left: 16.0,
-          right: 16.0,
-        ),
+        behavior: SnackBarBehavior.fixed,
       ),
     );
+  }
+
+  Future<void> _handleStopGeneration() async {
+    print("[ChatScreen] _handleStopGeneration: Called");
+    try {
+      await _chatService.stopGeneration();
+      print("[ChatScreen] _handleStopGeneration: Generation stopped successfully");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Generation stopped.'),
+            duration: Duration(seconds: 1),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    } catch (e) {
+      print("[ChatScreen] _handleStopGeneration: Error stopping generation - $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error stopping generation: ${e.toString()}'),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -469,6 +468,31 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   const SizedBox(width: 8.0),
+                  // Show stop button during generation (Android only)
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _chatService.isGenerating,
+                    builder: (context, isGenerating, child) {
+                      final showStopButton = isGenerating && !kIsWeb && Platform.isAndroid;
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (showStopButton) ...[
+                            IconButton(
+                              icon: const Icon(Icons.stop),
+                              onPressed: _handleStopGeneration,
+                              style: IconButton.styleFrom(
+                                backgroundColor: Colors.red,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.all(12),
+                              ),
+                              tooltip: 'Stop Generation',
+                            ),
+                            const SizedBox(width: 8.0),
+                          ],
+                        ],
+                      );
+                    },
+                  ),
                   IconButton(
                     icon:
                         _isSending

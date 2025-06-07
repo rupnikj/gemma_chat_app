@@ -30,7 +30,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_gemma: ^0.8.6
+  flutter_gemma:
+    git:
+      url: https://github.com/rupnikj/flutter_gemma.git
   file_picker: ^10.1.9
   shared_preferences: ^2.5.3
   provider: ^6.1.2

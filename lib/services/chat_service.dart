@@ -15,6 +15,10 @@ class ChatService {
   InferenceModel? _inferenceModel;
   InferenceChat? _chat;
 
+  // Track generation state for stop functionality
+  bool _isGenerating = false;
+  StreamController<String>? _currentStreamController;
+
   // Default configuration values
   static const int _defaultMaxTokens = 4096;
   static const PreferredBackend _defaultBackend = PreferredBackend.cpu;
@@ -26,6 +30,7 @@ class ChatService {
 
   final ValueNotifier<bool> isModelReady = ValueNotifier<bool>(false);
   final ValueNotifier<String?> currentModelPath = ValueNotifier<String?>(null);
+  final ValueNotifier<bool> isGenerating = ValueNotifier<bool>(false);
 
   // Configuration ValueNotifiers
   final ValueNotifier<int> maxTokens = ValueNotifier<int>(_defaultMaxTokens);
@@ -225,14 +230,14 @@ class ChatService {
     try {
       final currentSeed =
           useFixedRandomSeed.value
-              ? randomSeed.value
+              ? (randomSeed.value ?? _defaultRandomSeed)
               : Random().nextInt(1 << 30); // Generate a random int if not fixed
 
       _chat = await _inferenceModel!.createChat(
         temperature: temperature.value,
         topK: topK.value,
         topP: topP.value,
-        randomSeed: currentSeed ?? _defaultRandomSeed, // Use default if null
+        randomSeed: currentSeed,
       );
       print(
         'Chat recreated successfully. Seed: $currentSeed, Temp: ${temperature.value}, TopK: ${topK.value}, TopP: ${topP.value}',
@@ -359,15 +364,62 @@ class ChatService {
   Stream<String> sendMessage(String text) async* {
     if (!isModelReady.value || _chat == null) {
       print('Chat service is not ready or chat session is null.');
-      // Return an error stream or throw an exception
       throw Exception("Model not loaded or chat session not initialized.");
     }
 
-    // Properly await addQueryChunk before calling generateChatResponseAsync
-    // This prevents the "Previous invocation still processing" error
-    final message = Message(text: text, isUser: true);
-    await _chat!.addQueryChunk(message);
-    yield* _chat!.generateChatResponseAsync();
+    if (_isGenerating) {
+      print('Generation already in progress.');
+      throw Exception("Generation already in progress.");
+    }
+
+    _isGenerating = true;
+    isGenerating.value = true;
+    
+    // Create a new stream controller for this generation
+    _currentStreamController = StreamController<String>();
+    
+    try {
+      // Properly await addQueryChunk before calling generateChatResponseAsync
+      final message = Message(text: text, isUser: true);
+      await _chat!.addQueryChunk(message);
+      
+      // Start the generation stream
+      final responseStream = _chat!.generateChatResponseAsync();
+      
+      await for (final token in responseStream) {
+        if (!_isGenerating) {
+          // Generation was stopped
+          print('Generation stopped by user');
+          break;
+        }
+        
+        _currentStreamController?.add(token);
+        yield token;
+      }
+    } catch (e) {
+      print('Error during message generation: $e');
+      
+      // Check if this is a MediaPipe timestamp error and try to recover
+      if (e.toString().contains('Packet timestamp mismatch') || 
+          e.toString().contains('Previous invocation still processing')) {
+        print('MediaPipe session error detected, attempting to recreate chat session...');
+        try {
+          await _recreateChat();
+          print('Chat session recreated successfully after error');
+          throw Exception("MediaPipe session error. Chat session has been reset. Please try again.");
+        } catch (recreateError) {
+          print('Failed to recreate chat session: $recreateError');
+          throw Exception("MediaPipe session error and failed to recover. Please restart the chat manually.");
+        }
+      }
+      
+      rethrow;
+    } finally {
+      _isGenerating = false;
+      isGenerating.value = false;
+      _currentStreamController?.close();
+      _currentStreamController = null;
+    }
   }
 
   Future<void> restartChat() async {
@@ -395,6 +447,46 @@ class ChatService {
   List<Message> getChatHistory() {
     return _chat?.fullHistory ?? [];
   }
+
+  /// Stop the current generation if it's in progress
+  /// This is Android-only functionality
+  Future<void> stopGeneration() async {
+    if (!_isGenerating || _chat == null) {
+      print('No generation in progress to stop.');
+      return;
+    }
+
+    try {
+      print('Stopping generation...');
+      // Call the new cancelGenerateResponseAsync method
+      await _chat!.cancelGenerateResponseAsync();
+      print('Generation stopped successfully');
+    } catch (e) {
+      print('Error stopping generation: $e');
+      
+      // Check if this is a MediaPipe session error
+      if (e.toString().contains('Packet timestamp mismatch') || 
+          e.toString().contains('Previous invocation still processing')) {
+        print('MediaPipe session error during stop, attempting to recreate chat session...');
+        try {
+          await _recreateChat();
+          print('Chat session recreated successfully after stop error');
+        } catch (recreateError) {
+          print('Failed to recreate chat session after stop error: $recreateError');
+        }
+      }
+      
+      // Even if there's an error, we should still update our state
+    } finally {
+      _isGenerating = false;
+      isGenerating.value = false;
+      _currentStreamController?.close();
+      _currentStreamController = null;
+    }
+  }
+
+  /// Check if generation is currently in progress
+  bool get isCurrentlyGenerating => _isGenerating;
 
   Future<void> removeModel() async {
     print('Removing model...');

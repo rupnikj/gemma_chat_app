@@ -97,10 +97,11 @@ packages:
   flutter_gemma:
     dependency: "direct main"
     description:
-      name: flutter_gemma
-      sha256: c76dba0a897120b396a62191ab65740d58db8139242b71601983fea66155fe84
-      url: "https://pub.dev"
-    source: hosted
+      path: "."
+      ref: HEAD
+      resolved-ref: f9318c50e781bd0c27eba8f995489daf295b79fb
+      url: "https://github.com/rupnikj/flutter_gemma.git"
+    source: git
     version: "0.8.6"
   flutter_lints:
     dependency: "direct dev"
