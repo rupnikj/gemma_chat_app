@@ -216,7 +216,7 @@ class ChatService {
     }
 
     // If there's an existing chat session, close it before creating a new one.
-    if (_chat != null && _chat!.session != null) {
+    if (_chat != null) {
       print("Closing existing chat session before recreating...");
       try {
         await _chat!.session.close();
