@@ -3,8 +3,11 @@ import 'package:flutter/foundation.dart';
 import 'dart:io' show Platform;
 import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
+import 'package:gemma_chat_app/services/asr_service.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
 import 'package:flutter_gemma/flutter_gemma.dart'; // For Message class
+import 'package:record/record.dart';
+import 'package:flutter/services.dart';
 
 void main() {
   // Ensure Flutter bindings are initialized
@@ -59,6 +62,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late ChatService _chatService;
 
+  // ASR related variables
+  late AsrService _asrService;
+  bool _asrInitialized = false;
+  RecordState _recordState = RecordState.stop;
+  String _transcriptionText = '';
+
   @override
   void initState() {
     super.initState();
@@ -70,6 +79,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // Add scroll listener to detect manual scrolling
     _scrollController.addListener(_onScroll);
+
+    // Initialize ASR service
+    _asrService = AsrService();
+    _initializeAsrService();
 
     _initializeChatService();
   }
@@ -103,6 +116,93 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     _lastScrollPosition = currentScroll;
+  }
+
+  Future<void> _initializeAsrService() async {
+    try {
+      debugPrint('Starting ASR service initialization...');
+      
+      // Test if we can access the assets first
+      await _testAssetAccess();
+      
+      debugPrint('Attempting to initialize with model type 0 (English)');
+      await _asrService.initialize(modelType: 0);
+      debugPrint('ASR service initialized successfully');
+      setState(() {
+        _asrInitialized = true;
+      });
+      
+      // Listen to ASR results
+      _asrService.resultStream.listen((result) {
+        setState(() {
+          _transcriptionText = result.text;
+          // If it's a final result, add it to the text controller
+          if (result.isFinal && result.text.isNotEmpty) {
+            // Extract just the latest transcribed text (after the index)
+            final lines = result.text.split('\n');
+            if (lines.isNotEmpty) {
+              final latestLine = lines.first;
+              final colonIndex = latestLine.indexOf(': ');
+              if (colonIndex != -1) {
+                final transcribedText = latestLine.substring(colonIndex + 2);
+                _textController.text = transcribedText;
+              }
+            }
+          }
+        });
+      });
+      
+      // Listen to recording state changes
+      _asrService.stateStream.listen((state) {
+        setState(() {
+          _recordState = state;
+        });
+      });
+    } catch (e, stackTrace) {
+      debugPrint('Failed to initialize ASR service: $e');
+      debugPrint('Stack trace: $stackTrace');
+      // Don't enable the button if initialization failed
+      setState(() {
+        _asrInitialized = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('ASR initialization failed: $e'),
+            behavior: SnackBarBehavior.fixed,
+            duration: const Duration(seconds: 8),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: _initializeAsrService,
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _testAssetAccess() async {
+    try {
+      debugPrint('Testing asset access...');
+      final testAssets = [
+        'assets/sherpa-onnx-streaming-zipformer-en-2023-06-26/tokens.txt',
+        'assets/sherpa-onnx-streaming-zipformer-en-2023-06-26/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx',
+      ];
+      
+      for (final asset in testAssets) {
+        try {
+          final data = await rootBundle.load(asset);
+          debugPrint('✓ Successfully loaded $asset (${data.lengthInBytes} bytes)');
+        } catch (e) {
+          debugPrint('✗ Failed to load $asset: $e');
+          throw Exception('Asset $asset not accessible: $e');
+        }
+      }
+      debugPrint('All test assets loaded successfully');
+    } catch (e) {
+      debugPrint('Asset test failed: $e');
+      rethrow;
+    }
   }
 
   Future<void> _initializeChatService() async {
@@ -157,6 +257,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.dispose();
     _chatService.isModelReady.removeListener(_onModelStateChanged);
     _chatService.currentModelPath.removeListener(_onModelStateChanged);
+    _asrService.dispose();
     super.dispose();
   }
 
@@ -361,6 +462,41 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _handleMicPress() async {
+    if (!_asrInitialized) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Speech recognition not initialized yet.'),
+          behavior: SnackBarBehavior.fixed,
+        ),
+      );
+      return;
+    }
+
+    if (_recordState == RecordState.record) {
+      // Stop recording
+      await _asrService.stopRecording();
+    } else {
+      // Start recording
+      _asrService.reset(); // Reset previous transcription
+      setState(() {
+        _transcriptionText = '';
+      });
+      
+      final started = await _asrService.startRecording();
+      if (!started) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to start recording. Please check microphone permissions.'),
+              behavior: SnackBarBehavior.fixed,
+            ),
+          );
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Re-access chatService here if you prefer it to be a local var in build
@@ -423,8 +559,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   );
                 },
+                              ),
               ),
-            ),
             if (_isModelInitializing &&
                 _chatService.currentModelPath.value != null)
               const Padding(
@@ -438,6 +574,18 @@ class _ChatScreenState extends State<ChatScreen> {
                   ],
                 ),
               ),
+            // ASR status indicator
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Text(
+                'Speech Recognition: ${_asrInitialized ? "Ready" : "Initializing..."}',
+                style: TextStyle(
+                  color: _asrInitialized ? Colors.greenAccent : Colors.orangeAccent,
+                  fontSize: 12,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
             Expanded(
               child: ListView.builder(
                 controller: _scrollController,
@@ -449,6 +597,35 @@ class _ChatScreenState extends State<ChatScreen> {
                 },
               ),
             ),
+            // Show transcription text if recording
+            if (_recordState == RecordState.record && _transcriptionText.isNotEmpty)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.symmetric(horizontal: 8.0),
+                padding: const EdgeInsets.all(12.0),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8.0),
+                  border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Live Transcription:',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _transcriptionText,
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.all(8.0),
               child: Row(
@@ -457,7 +634,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: TextField(
                       controller: _textController,
                       decoration: InputDecoration(
-                        hintText: 'Enter message...',
+                        hintText: 'Enter message or tap mic to speak...',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(20.0),
                         ),
@@ -466,6 +643,32 @@ class _ChatScreenState extends State<ChatScreen> {
                       onSubmitted: (_) => _handleSendMessage(),
                       enabled: _chatService.isModelReady.value && !_isSending,
                     ),
+                  ),
+                  const SizedBox(width: 8.0),
+                  // Microphone button
+                  IconButton(
+                    icon: Icon(
+                      _recordState == RecordState.record 
+                          ? Icons.mic 
+                          : Icons.mic_none,
+                    ),
+                    onPressed: _asrInitialized ? _handleMicPress : null,
+                    style: IconButton.styleFrom(
+                      backgroundColor: _recordState == RecordState.record 
+                          ? Colors.red 
+                          : (_asrInitialized 
+                              ? Theme.of(context).colorScheme.secondary 
+                              : Colors.grey),
+                      foregroundColor: _recordState == RecordState.record 
+                          ? Colors.white 
+                          : (_asrInitialized 
+                              ? Theme.of(context).colorScheme.onSecondary 
+                              : Colors.white),
+                      padding: const EdgeInsets.all(12),
+                    ),
+                    tooltip: _recordState == RecordState.record 
+                        ? 'Stop Recording' 
+                        : (_asrInitialized ? 'Start Recording' : 'ASR Failed to Initialize'),
                   ),
                   const SizedBox(width: 8.0),
                   // Show stop button during generation (Android only)
