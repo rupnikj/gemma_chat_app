@@ -1,0 +1,227 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: dart-api-examples/non-streaming-asr/bin/whisper.dart, dart-api-examples/vad/bin/init.dart, flutter/sherpa_onnx/lib/sherpa_onnx.dart
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+dart-api-examples/
+  non-streaming-asr/
+    bin/
+      whisper.dart
+  vad/
+    bin/
+      init.dart
+flutter/
+  sherpa_onnx/
+    lib/
+      sherpa_onnx.dart
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="dart-api-examples/non-streaming-asr/bin/whisper.dart">
+// Copyright (c)  2024  Xiaomi Corporation
+import 'dart:io';
+
+import 'package:args/args.dart';
+import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
+
+import './init.dart';
+
+void main(List<String> arguments) async {
+  await initSherpaOnnx();
+
+  final parser = ArgParser()
+    ..addOption('encoder', help: 'Path to the whisper encoder model')
+    ..addOption('decoder', help: 'Path to whisper decoder model')
+    ..addOption('tokens', help: 'Path to tokens.txt')
+    ..addOption('input-wav', help: 'Path to input.wav to transcribe');
+
+  final res = parser.parse(arguments);
+  if (res['encoder'] == null ||
+      res['decoder'] == null ||
+      res['tokens'] == null ||
+      res['input-wav'] == null) {
+    print(parser.usage);
+    exit(1);
+  }
+
+  final encoder = res['encoder'] as String;
+  final decoder = res['decoder'] as String;
+  final tokens = res['tokens'] as String;
+  final inputWav = res['input-wav'] as String;
+
+  final whisper = sherpa_onnx.OfflineWhisperModelConfig(
+    encoder: encoder,
+    decoder: decoder,
+  );
+
+  final modelConfig = sherpa_onnx.OfflineModelConfig(
+    whisper: whisper,
+    tokens: tokens,
+    modelType: 'whisper',
+    debug: false,
+    numThreads: 1,
+  );
+  final config = sherpa_onnx.OfflineRecognizerConfig(model: modelConfig);
+  final recognizer = sherpa_onnx.OfflineRecognizer(config);
+
+  final waveData = sherpa_onnx.readWave(inputWav);
+  final stream = recognizer.createStream();
+
+  stream.acceptWaveform(
+      samples: waveData.samples, sampleRate: waveData.sampleRate);
+  recognizer.decode(stream);
+
+  final result = recognizer.getResult(stream);
+  print(result.text);
+
+  stream.free();
+  recognizer.free();
+}
+</file>
+
+<file path="dart-api-examples/vad/bin/init.dart">
+// Copyright (c)  2024  Xiaomi Corporation
+import 'dart:io';
+import 'dart:isolate';
+import 'package:path/path.dart' as p;
+import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
+
+Future<void> initSherpaOnnx() async {
+  String platform = '';
+
+  if (Platform.isMacOS) {
+    platform = 'macos';
+  } else if (Platform.isLinux) {
+    platform = 'linux';
+  } else if (Platform.isWindows) {
+    platform = 'windows';
+  } else {
+    throw UnsupportedError('Unknown platform: ${Platform.operatingSystem}');
+  }
+
+  var uri = await Isolate.resolvePackageUri(
+      Uri.parse('package:sherpa_onnx_$platform/any_path_is_ok_here.dart'));
+
+  if (uri == null) {
+    print('File not found');
+    exit(1);
+  }
+
+  final libPath = p.join(p.dirname(p.fromUri(uri)), '..', platform);
+  sherpa_onnx.initBindings(libPath);
+}
+</file>
+
+<file path="flutter/sherpa_onnx/lib/sherpa_onnx.dart">
+// Copyright (c)  2024  Xiaomi Corporation
+import 'dart:io';
+import 'dart:ffi';
+
+export 'src/audio_tagging.dart';
+export 'src/feature_config.dart';
+export 'src/homophone_replacer_config.dart';
+export 'src/keyword_spotter.dart';
+export 'src/offline_punctuation.dart';
+export 'src/offline_recognizer.dart';
+export 'src/offline_speaker_diarization.dart';
+export 'src/offline_speech_denoiser.dart';
+export 'src/offline_stream.dart';
+export 'src/online_punctuation.dart';
+export 'src/online_recognizer.dart';
+export 'src/online_stream.dart';
+export 'src/speaker_identification.dart';
+export 'src/tts.dart';
+export 'src/vad.dart';
+export 'src/wave_reader.dart';
+export 'src/wave_writer.dart';
+
+import 'src/sherpa_onnx_bindings.dart';
+
+String? _path;
+
+// see also
+// https://github.com/flutter/codelabs/blob/main/ffigen_codelab/step_05/lib/ffigen_app.dart
+// https://api.flutter.dev/flutter/dart-io/Platform-class.html
+final DynamicLibrary _dylib = () {
+  if (Platform.isMacOS) {
+    if (_path == null) {
+      return DynamicLibrary.open('libsherpa-onnx-c-api.dylib');
+    } else {
+      return DynamicLibrary.open('$_path/libsherpa-onnx-c-api.dylib');
+    }
+  }
+
+  if (Platform.isIOS) {
+    if (_path == null) {
+      return DynamicLibrary.open('sherpa_onnx.framework/sherpa_onnx');
+    } else {
+      return DynamicLibrary.open('$_path/sherpa_onnx.framework/sherpa_onnx');
+    }
+  }
+
+  if (Platform.isAndroid || Platform.isLinux) {
+    if (_path == null) {
+      return DynamicLibrary.open('libsherpa-onnx-c-api.so');
+    } else {
+      return DynamicLibrary.open('$_path/libsherpa-onnx-c-api.so');
+    }
+  }
+
+  if (Platform.isWindows) {
+    if (_path == null) {
+      return DynamicLibrary.open('sherpa-onnx-c-api.dll');
+    } else {
+      return DynamicLibrary.open('$_path\\sherpa-onnx-c-api.dll');
+    }
+  }
+
+  throw UnsupportedError('Unknown platform: ${Platform.operatingSystem}');
+}();
+
+void initBindings([String? p]) {
+  _path ??= p;
+  SherpaOnnxBindings.init(_dylib);
+}
+</file>
+
+</files>

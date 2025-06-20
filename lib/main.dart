@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, File;
 import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
+import 'package:gemma_chat_app/services/asr_service.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
 import 'package:flutter_gemma/flutter_gemma.dart'; // For Message class
+import 'package:record/record.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 
 void main() {
   // Ensure Flutter bindings are initialized
@@ -49,6 +54,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final AudioRecorder _audioRecorder = AudioRecorder();
 
   List<Message> _messages = [];
   bool _isSending = false;
@@ -58,11 +64,18 @@ class _ChatScreenState extends State<ChatScreen> {
   double _lastScrollPosition = 0.0; // Track last scroll position
 
   late ChatService _chatService;
+  late AsrService _asrService;
+  
+  // Recording state
+  bool _isRecording = false;
+  bool _isTranscribing = false;
+  String? _recordingPath;
 
   @override
   void initState() {
     super.initState();
     _chatService = Provider.of<ChatService>(context, listen: false);
+    _asrService = AsrService();
 
     // Listen to model readiness and path changes to rebuild UI
     _chatService.isModelReady.addListener(_onModelStateChanged);
@@ -72,6 +85,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.addListener(_onScroll);
 
     _initializeChatService();
+    _initializeAsrService();
   }
 
   // Handle scroll events to detect manual scrolling
@@ -134,6 +148,23 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _initializeAsrService() async {
+    try {
+      await _asrService.initialize();
+      print("ASR Service initialized successfully");
+    } catch (e) {
+      print("Error initializing ASR Service: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('ASR initialization failed: ${e.toString()}'),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
   void _onModelStateChanged() {
     if (mounted) {
       setState(() {
@@ -157,6 +188,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.dispose();
     _chatService.isModelReady.removeListener(_onModelStateChanged);
     _chatService.currentModelPath.removeListener(_onModelStateChanged);
+    _audioRecorder.dispose();
+    _asrService.dispose();
     super.dispose();
   }
 
@@ -325,13 +358,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages = []; // Always start with a fresh, modifiable list
     });
     if (!mounted) return; // Check if context is still valid
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Chat restarted.'),
-        duration: Duration(seconds: 1),
-        behavior: SnackBarBehavior.fixed,
-      ),
-    );
+    
   }
 
   Future<void> _handleStopGeneration() async {
@@ -339,15 +366,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _chatService.stopGeneration();
       print("[ChatScreen] _handleStopGeneration: Generation stopped successfully");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Generation stopped.'),
-            duration: Duration(seconds: 1),
-            behavior: SnackBarBehavior.fixed,
-          ),
-        );
-      }
+      
     } catch (e) {
       print("[ChatScreen] _handleStopGeneration: Error stopping generation - $e");
       if (mounted) {
@@ -355,6 +374,136 @@ class _ChatScreenState extends State<ChatScreen> {
           SnackBar(
             content: Text('Error stopping generation: ${e.toString()}'),
             behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleVoiceRecording() async {
+    if (_isRecording) {
+      await _stopRecording();
+    } else {
+      await _startRecording();
+    }
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      // Request microphone permission
+      final status = await Permission.microphone.request();
+      if (status != PermissionStatus.granted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Microphone permission is required for voice recording'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 1),
+            ),
+          );
+        }
+        return;
+      }
+
+      // Check if ASR service is ready
+      if (!_asrService.isReady) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('ASR service is not ready yet'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Get temporary directory for recording
+      final tempDir = await getTemporaryDirectory();
+      final fileName = 'voice_recording_${DateTime.now().millisecondsSinceEpoch}.wav';
+      _recordingPath = path.join(tempDir.path, fileName);
+
+      // Start recording
+      await _audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          bitRate: 128000,
+          numChannels: 1
+        ),
+        path: _recordingPath!,
+      );
+
+      setState(() {
+        _isRecording = true;
+      });
+      
+    } catch (e) {
+      print("Error starting recording: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to start recording: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    try {
+      await _audioRecorder.stop();
+      
+      setState(() {
+        _isRecording = false;
+        _isTranscribing = true;
+      });
+
+      if (_recordingPath != null) {
+        // Transcribe the recorded audio
+        final transcription = await _asrService.transcribeFromFile(_recordingPath!);
+        
+        setState(() {
+          _isTranscribing = false;
+        });
+
+        if (transcription.isNotEmpty) {
+          // Set the transcribed text in the text field
+          _textController.text = transcription;
+          
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('No speech detected in the recording'),
+                backgroundColor: Colors.orange,
+                duration: Duration(seconds: 1),
+              ),
+            );
+          }
+        }
+
+        // Clean up the temporary file
+        final file = File(_recordingPath!);
+        if (await file.exists()) {
+          await file.delete();
+        }
+        _recordingPath = null;
+      }
+    } catch (e) {
+      print("Error stopping recording: $e");
+      setState(() {
+        _isRecording = false;
+        _isTranscribing = false;
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to process recording: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 1),
           ),
         );
       }
@@ -457,15 +606,49 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: TextField(
                       controller: _textController,
                       decoration: InputDecoration(
-                        hintText: 'Enter message...',
+                        hintText: _isRecording 
+                            ? 'Recording...' 
+                            : _isTranscribing 
+                                ? 'Transcribing...' 
+                                : 'Enter message or use voice...',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(20.0),
                         ),
                         filled: true,
                       ),
                       onSubmitted: (_) => _handleSendMessage(),
-                      enabled: _chatService.isModelReady.value && !_isSending,
+                      enabled: _chatService.isModelReady.value && !_isSending && !_isRecording && !_isTranscribing,
                     ),
+                  ),
+                  const SizedBox(width: 8.0),
+                  // Voice recording button
+                  IconButton(
+                    icon: _isRecording
+                        ? const Icon(Icons.stop, color: Colors.red)
+                        : _isTranscribing
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.mic),
+                    onPressed: (_isRecording || _isTranscribing) 
+                        ? (_isRecording ? _handleVoiceRecording : null)
+                        : (_asrService.isReady ? _handleVoiceRecording : null),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _isRecording 
+                          ? Colors.red.withValues(alpha: 0.2)
+                          : Theme.of(context).colorScheme.secondary,
+                      foregroundColor: _isRecording 
+                          ? Colors.red 
+                          : Theme.of(context).colorScheme.onSecondary,
+                      padding: const EdgeInsets.all(12),
+                    ),
+                    tooltip: _isRecording 
+                        ? 'Stop Recording' 
+                        : _isTranscribing 
+                            ? 'Transcribing...' 
+                            : 'Voice Recording',
                   ),
                   const SizedBox(width: 8.0),
                   // Show stop button during generation (Android only)
@@ -503,7 +686,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             )
                             : const Icon(Icons.send),
                     onPressed:
-                        (_chatService.isModelReady.value && !_isSending)
+                        (_chatService.isModelReady.value && !_isSending && !_isRecording && !_isTranscribing)
                             ? _handleSendMessage
                             : null,
                     style: IconButton.styleFrom(
