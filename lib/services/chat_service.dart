@@ -91,10 +91,10 @@ class ChatService {
         );
       } catch (e) {
         print('Error loading model from saved path: $e');
-        // Optionally clear the saved path if loading fails
-        // await prefs.remove(_modelPathKey);
-        // currentModelPath.value = null;
-        // isModelReady.value = false;
+        // Clear the saved path if loading fails
+        await prefs.remove(_modelPathKey);
+        currentModelPath.value = null;
+        isModelReady.value = false;
       }
     } else {
       print('No saved model path found.');
@@ -300,6 +300,10 @@ class ChatService {
     print('Attempting to load model from: $path');
 
     try {
+      // Clear any previously cached model to ensure clean state
+      await _gemma.modelManager.deleteModel();
+      print('Cleared any previously cached model');
+      
       // This step makes the model file available to the plugin.
       // For native platforms, this might involve telling the native side where the file is.
       // For web, this path might be a URL.
@@ -354,9 +358,9 @@ class ChatService {
       print('Error during _loadModelFromPath: $e');
       isModelReady.value = false;
       currentModelPath.value = null;
-      // Optionally remove the path from prefs if loading fails critically
-      // final prefs = await _prefs;
-      // await prefs.remove(_modelPathKey);
+      // Remove the path from prefs if loading fails critically
+      final prefs = await _prefs;
+      await prefs.remove(_modelPathKey);
       rethrow; // Rethrow to allow UI to handle it
     }
   }

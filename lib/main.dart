@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:io' show Platform, File;
+import 'dart:async';
 import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
 import 'package:gemma_chat_app/services/asr_service.dart';
+import 'package:gemma_chat_app/services/tts_service.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
 import 'package:flutter_gemma/flutter_gemma.dart'; // For Message class
 import 'package:record/record.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:audioplayers/audioplayers.dart';
 
 void main() {
   // Ensure Flutter bindings are initialized
@@ -55,6 +58,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final AudioRecorder _audioRecorder = AudioRecorder();
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   List<Message> _messages = [];
   bool _isSending = false;
@@ -65,6 +69,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late ChatService _chatService;
   late AsrService _asrService;
+  late TtsService _ttsService;
   
   // Recording state
   bool _isRecording = false;
@@ -76,6 +81,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _chatService = Provider.of<ChatService>(context, listen: false);
     _asrService = AsrService();
+    _ttsService = TtsService();
 
     // Listen to model readiness and path changes to rebuild UI
     _chatService.isModelReady.addListener(_onModelStateChanged);
@@ -86,6 +92,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _initializeChatService();
     _initializeAsrService();
+    _initializeTtsService();
   }
 
   // Handle scroll events to detect manual scrolling
@@ -165,6 +172,23 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _initializeTtsService() async {
+    try {
+      await _ttsService.initialize();
+      print("TTS Service initialized successfully");
+    } catch (e) {
+      print("Error initializing TTS Service: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('TTS initialization failed: ${e.toString()}'),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
   void _onModelStateChanged() {
     if (mounted) {
       setState(() {
@@ -189,7 +213,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _chatService.isModelReady.removeListener(_onModelStateChanged);
     _chatService.currentModelPath.removeListener(_onModelStateChanged);
     _audioRecorder.dispose();
+    _audioPlayer.dispose();
     _asrService.dispose();
+    _ttsService.dispose();
     super.dispose();
   }
 
@@ -293,6 +319,16 @@ class _ChatScreenState extends State<ChatScreen> {
         print(
           "[ChatScreen] _handleSendMessage: Stream completed without emitting any tokens.",
         );
+      } else {
+        // Automatically play TTS for the AI response when generation is complete
+        final aiResponse = _messages.last.text.trim();
+        if (aiResponse.isNotEmpty && _ttsService.isReady) {
+          print("[ChatScreen] _handleSendMessage: Auto-playing TTS for AI response");
+          // Don't await this so it doesn't block the UI
+          _handlePlayTts(aiResponse).catchError((e) {
+            print("Error auto-playing TTS: $e");
+          });
+        }
       }
     } catch (e) {
       print("[ChatScreen] _handleSendMessage: Error sending message - $e");
@@ -510,6 +546,62 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _handlePlayTts(String text) async {
+    if (!_ttsService.isReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('TTS service is not ready yet.'),
+          behavior: SnackBarBehavior.fixed,
+        ),
+      );
+      return;
+    }
+
+    try {
+      // Generate a temporary file path for the audio
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final audioPath = path.join(tempDir.path, 'tts_$timestamp.wav');
+
+      // Generate speech and save to file - this will run in background automatically
+      // due to the TTS service's implementation
+      await _ttsService.generateSpeechToFile(
+        text: text,
+        outputPath: audioPath,
+        speed: 1.0,
+        speakerId: 0,
+      );
+
+      // Play the audio file
+      await _audioPlayer.play(DeviceFileSource(audioPath));
+
+      print("TTS: Generated and playing speech for text: ${text.substring(0, text.length > 50 ? 50 : text.length)}...");
+
+      // Clean up the temporary file after the audio finishes playing
+      // Use a one-time listener to avoid memory leaks
+      late StreamSubscription subscription;
+      subscription = _audioPlayer.onPlayerComplete.listen((_) async {
+        final file = File(audioPath);
+        if (await file.exists()) {
+          await file.delete();
+        }
+        subscription.cancel(); // Cancel the subscription to avoid memory leaks
+      });
+
+    } catch (e) {
+      print("Error generating or playing TTS: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to generate or play speech: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Re-access chatService here if you prefer it to be a local var in build
@@ -594,7 +686,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 itemCount: _messages.length,
                 itemBuilder: (context, index) {
                   final message = _messages[index];
-                  return _ChatMessageBubble(message: message);
+                  return _ChatMessageBubble(
+                    message: message,
+                    onPlayTts: message.isUser ? null : () => _handlePlayTts(message.text),
+                    ttsService: _ttsService,
+                  );
                 },
               ),
             ),
@@ -707,8 +803,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
 class _ChatMessageBubble extends StatelessWidget {
   final Message message;
+  final VoidCallback? onPlayTts;
+  final TtsService ttsService;
 
-  const _ChatMessageBubble({required this.message});
+  const _ChatMessageBubble({
+    required this.message,
+    this.onPlayTts,
+    required this.ttsService,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -724,14 +826,53 @@ class _ChatMessageBubble extends StatelessWidget {
                   : Theme.of(context).colorScheme.secondaryContainer,
           borderRadius: BorderRadius.circular(16.0),
         ),
-        child: Text(
-          message.text,
-          style: TextStyle(
-            color:
-                message.isUser
-                    ? Theme.of(context).colorScheme.onPrimary
-                    : Theme.of(context).colorScheme.onSecondaryContainer,
-          ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              message.text,
+              style: TextStyle(
+                color:
+                    message.isUser
+                        ? Theme.of(context).colorScheme.onPrimary
+                        : Theme.of(context).colorScheme.onSecondaryContainer,
+              ),
+            ),
+            if (!message.isUser && message.text.isNotEmpty && onPlayTts != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8.0),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: ttsService.isProcessing,
+                    builder: (context, isProcessing, child) {
+                      return IconButton(
+                        onPressed: isProcessing ? null : onPlayTts,
+                        icon: isProcessing
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.play_arrow),
+                        iconSize: 20,
+                        padding: const EdgeInsets.all(4),
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        style: IconButton.styleFrom(
+                          backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.1),
+                          foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
+                        ),
+                        tooltip: 'Play speech',
+                      );
+                    },
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
