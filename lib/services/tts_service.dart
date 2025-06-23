@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:flutter/services.dart';
@@ -30,26 +31,26 @@ class TtsService {
       // Copy assets to local storage and get their paths
       final modelPaths = await _copyAssetsToLocal();
       
-      // Create the Kokoro model configuration
+      // Create the Kokoro model configuration optimized for speed
       final kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
         model: modelPaths['model']!,
         voices: modelPaths['voices']!,
         tokens: modelPaths['tokens']!,
         dataDir: modelPaths['dataDir']!,
-        lengthScale: 1.0, // Default speed
+        lengthScale: 0.8, // Slightly faster speed for lower latency
       );
 
-      // Create the model configuration
+      // Create the model configuration optimized for speed
       final modelConfig = sherpa_onnx.OfflineTtsModelConfig(
         kokoro: kokoro,
-        numThreads: 2, // Use 2 threads for better performance
+        numThreads: 4, // Use more threads for faster processing
         debug: false,
       );
 
-      // Create the TTS configuration
+      // Create the TTS configuration optimized for speed
       final config = sherpa_onnx.OfflineTtsConfig(
         model: modelConfig,
-        maxNumSenetences: 1, // kokoro needs 1
+        maxNumSenetences: 1, // Keep at 1 for minimal latency
         ruleFsts: '',
         ruleFars: '',
       );
@@ -60,7 +61,7 @@ class TtsService {
       _isInitialized = true;
       isInitialized.value = true;
       
-      debugPrint('[TtsService] Successfully initialized TTS service');
+      debugPrint('[TtsService] Successfully initialized TTS service with speed optimizations');
     } catch (e) {
       final errorMsg = 'Failed to initialize TTS service: $e';
       debugPrint('[TtsService] $errorMsg');
@@ -185,13 +186,47 @@ class TtsService {
     }
   }
 
+  /// Generate speech from text (optimized for low latency)
+  Future<sherpa_onnx.GeneratedAudio> generateSpeech({
+    required String text,
+    double speed = 1.2, // Slightly faster default speed
+    int speakerId = 0,
+  }) async {
+    if (!_isInitialized || _tts == null) {
+      throw StateError('TTS service is not initialized. Call initialize() first.');
+    }
 
+    try {
+      isProcessing.value = true;
+      lastError.value = null;
 
-  /// Generate speech and save to file (non-blocking)
+      debugPrint('[TtsService] Generating speech for text: "$text" (speed: $speed, speaker: $speakerId)');
+
+      // Generate audio using the persistent TTS instance
+      final audio = _tts!.generate(
+        text: text,
+        sid: speakerId,
+        speed: speed,
+      );
+
+      debugPrint('[TtsService] Generated audio: ${audio.samples.length} samples at ${audio.sampleRate}Hz');
+
+      return audio;
+    } catch (e) {
+      final errorMsg = 'Failed to generate speech: $e';
+      debugPrint('[TtsService] $errorMsg');
+      lastError.value = errorMsg;
+      rethrow;
+    } finally {
+      isProcessing.value = false;
+    }
+  }
+
+  /// Generate speech and save to file (optimized for low latency)
   Future<String> generateSpeechToFile({
     required String text,
     required String outputPath,
-    double speed = 1.0,
+    double speed = 1.2,
     int speakerId = 0,
   }) async {
     if (!_isInitialized) {
@@ -202,21 +237,26 @@ class TtsService {
       isProcessing.value = true;
       lastError.value = null;
       
-      // Optimize text for better performance
-      final optimizedText = _optimizeTextForTts(text);
+      // Aggressively optimize text for minimal latency
+      final optimizedText = _optimizeTextForSpeed(text);
       
-      debugPrint('[TtsService] Starting non-blocking TTS generation for: "${optimizedText.substring(0, optimizedText.length > 50 ? 50 : optimizedText.length)}..."');
+      debugPrint('[TtsService] Fast TTS generation for: "$optimizedText"');
       
-      // Run TTS generation in a separate isolate to avoid blocking the main thread
-      await compute(_generateTtsInIsolate, {
-        'text': optimizedText,
-        'outputPath': outputPath,
-        'speed': speed,
-        'speakerId': speakerId,
-        'modelPaths': await _getModelPaths(),
-      });
+      // Generate speech using the persistent instance (no isolate overhead)
+      final audio = await generateSpeech(
+        text: optimizedText,
+        speed: speed,
+        speakerId: speakerId,
+      );
 
-      debugPrint('[TtsService] Completed non-blocking TTS generation and saved to $outputPath');
+      // Save to file
+      sherpa_onnx.writeWave(
+        filename: outputPath,
+        samples: audio.samples,
+        sampleRate: audio.sampleRate,
+      );
+
+      debugPrint('[TtsService] Fast TTS generation completed and saved to $outputPath');
       return outputPath;
     } catch (e) {
       final errorMsg = 'Failed to generate speech to file: $e';
@@ -228,47 +268,17 @@ class TtsService {
     }
   }
 
-  /// Get the current model paths for isolate usage
-  Future<Map<String, String>> _getModelPaths() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    final modelsDir = Directory(path.join(appDir.path, 'sherpa_onnx_tts_models'));
-    
-    return {
-      'model': path.join(modelsDir.path, 'model.int8.onnx'),
-      'tokens': path.join(modelsDir.path, 'tokens.txt'),
-      'voices': path.join(modelsDir.path, 'voices.bin'),
-      'dataDir': path.join(modelsDir.path, 'espeak-ng-data'),
-    };
-  }
-
-  /// Optimize text for TTS by limiting length and cleaning up formatting
-  String _optimizeTextForTts(String text) {
+  /// Optimize text for maximum speed (aggressive optimization)
+  String _optimizeTextForSpeed(String text) {
     // Remove excessive whitespace and clean up text
     String cleanText = text.trim().replaceAll(RegExp(r'\s+'), ' ');
     
-    // Limit text length to avoid very long generation times
-    const maxLength = 200; // Reduced to prevent ANR issues
-    if (cleanText.length > maxLength) {
-      // Find a good breaking point (end of sentence, paragraph, etc.)
-      int breakPoint = maxLength;
-      final sentenceEnd = cleanText.lastIndexOf('.', maxLength);
-      final questionEnd = cleanText.lastIndexOf('?', maxLength);
-      final exclamationEnd = cleanText.lastIndexOf('!', maxLength);
-      
-      final bestBreak = [sentenceEnd, questionEnd, exclamationEnd]
-          .where((i) => i > maxLength * 0.7) // At least 70% of max length
-          .fold(-1, (max, current) => current > max ? current : max);
-      
-      if (bestBreak > 0) {
-        breakPoint = bestBreak + 1;
-      }
-      
-      cleanText = cleanText.substring(0, breakPoint).trim();
-      debugPrint('[TtsService] Text truncated to $breakPoint characters for performance');
-    }
+    // Remove complex punctuation that might slow down generation
+    cleanText = cleanText.replaceAll(RegExp(r'[;:\[\](){}"*#]'), '');
     
     return cleanText;
   }
+
 
   /// Get available speaker IDs (for multi-speaker models)
   List<int> getAvailableSpeakers() {
@@ -293,69 +303,5 @@ class TtsService {
     } catch (e) {
       debugPrint('[TtsService] Error during disposal: $e');
     }
-  }
-}
-
-/// Top-level function for running TTS generation in an isolate
-/// This must be a top-level function to work with compute()
-Future<void> _generateTtsInIsolate(Map<String, dynamic> params) async {
-  final text = params['text'] as String;
-  final outputPath = params['outputPath'] as String;
-  final speed = params['speed'] as double;
-  final speakerId = params['speakerId'] as int;
-  final modelPaths = params['modelPaths'] as Map<String, String>;
-
-  try {
-    // Initialize sherpa-onnx bindings in the isolate
-    sherpa_onnx.initBindings();
-
-    // Create the Kokoro model configuration
-    final kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
-      model: modelPaths['model']!,
-      voices: modelPaths['voices']!,
-      tokens: modelPaths['tokens']!,
-      dataDir: modelPaths['dataDir']!,
-      lengthScale: 1.0,
-    );
-
-    // Create the model configuration
-    final modelConfig = sherpa_onnx.OfflineTtsModelConfig(
-      kokoro: kokoro,
-      numThreads: 2,
-      debug: false,
-    );
-
-    // Create the TTS configuration
-    final config = sherpa_onnx.OfflineTtsConfig(
-      model: modelConfig,
-      maxNumSenetences: 1,
-      ruleFsts: '',
-      ruleFars: '',
-    );
-
-    // Create the TTS instance
-    final tts = sherpa_onnx.OfflineTts(config);
-
-    // Generate audio
-    final audio = tts.generate(
-      text: text,
-      sid: speakerId,
-      speed: speed,
-    );
-
-    // Save to file
-    sherpa_onnx.writeWave(
-      filename: outputPath,
-      samples: audio.samples,
-      sampleRate: audio.sampleRate,
-    );
-
-    // Clean up
-    tts.free();
-
-    print('[TtsService] Isolate: Generated and saved TTS audio to $outputPath');
-  } catch (e) {
-    print('[TtsService] Isolate: Error generating TTS: $e');
-    rethrow;
   }
 } 

@@ -324,8 +324,8 @@ class _ChatScreenState extends State<ChatScreen> {
         final aiResponse = _messages.last.text.trim();
         if (aiResponse.isNotEmpty && _ttsService.isReady) {
           print("[ChatScreen] _handleSendMessage: Auto-playing TTS for AI response");
-          // Don't await this so it doesn't block the UI
-          _handlePlayTts(aiResponse).catchError((e) {
+          // Use fast first sentence generation for immediate feedback
+          _handlePlayTtsFast(aiResponse).catchError((e) {
             print("Error auto-playing TTS: $e");
           });
         }
@@ -563,12 +563,11 @@ class _ChatScreenState extends State<ChatScreen> {
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final audioPath = path.join(tempDir.path, 'tts_$timestamp.wav');
 
-      // Generate speech and save to file - this will run in background automatically
-      // due to the TTS service's implementation
+      // Generate speech and save to file with optimized settings
       await _ttsService.generateSpeechToFile(
         text: text,
         outputPath: audioPath,
-        speed: 1.0,
+        speed: 1.2, // Slightly faster for better responsiveness
         speakerId: 0,
       );
 
@@ -599,6 +598,45 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       }
+    }
+  }
+
+  Future<void> _handlePlayTtsFast(String text) async {
+    if (!_ttsService.isReady) {
+      return; // Fail silently for auto-play
+    }
+
+    try {
+      // Generate a temporary file path for the audio
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final audioPath = path.join(tempDir.path, 'tts_fast_$timestamp.wav');
+
+      await _ttsService.generateSpeechToFile(
+        text: text,
+        outputPath: audioPath,
+        speed: 1.3, // Even faster for immediate response
+        speakerId: 0,
+      );
+
+      // Play the audio file
+      await _audioPlayer.play(DeviceFileSource(audioPath));
+
+      print("TTS Fast: Generated and playing first sentence for immediate feedback");
+
+      // Clean up the temporary file after the audio finishes playing
+      late StreamSubscription subscription;
+      subscription = _audioPlayer.onPlayerComplete.listen((_) async {
+        final file = File(audioPath);
+        if (await file.exists()) {
+          await file.delete();
+        }
+        subscription.cancel();
+      });
+
+    } catch (e) {
+      print("Error with fast TTS generation: $e");
+      // Fail silently for auto-play to avoid disrupting user experience
     }
   }
 
