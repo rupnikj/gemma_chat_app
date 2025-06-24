@@ -5,7 +5,7 @@ import 'dart:async';
 import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
 import 'package:gemma_chat_app/services/asr_service.dart';
-import 'package:gemma_chat_app/services/tts_service.dart';
+import 'package:gemma_chat_app/services/tts_service_vits.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
 import 'package:flutter_gemma/flutter_gemma.dart'; // For Message class
 import 'package:record/record.dart';

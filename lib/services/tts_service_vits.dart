@@ -9,10 +9,9 @@ import 'package:path/path.dart' as path;
 import 'package:archive/archive.dart';
 
 class TtsService {
-  static const String _modelAssetPath = 'assets/kokoro-int8-en-v0_19/model.int8.onnx';
-  static const String _tokensAssetPath = 'assets/kokoro-int8-en-v0_19/tokens.txt';
-  static const String _voicesAssetPath = 'assets/kokoro-int8-en-v0_19/voices.bin';
-  static const String _espeakDataArchivePath = 'assets/kokoro-int8-en-v0_19/espeak-ng-data.zip';
+  static const String _modelAssetPath = 'assets/vits-piper-en_US-glados/en_US-glados.onnx';
+  static const String _tokensAssetPath = 'assets/vits-piper-en_US-glados/tokens.txt';
+  static const String _espeakDataArchivePath = 'assets/vits-piper-en_US-glados/espeak-ng-data.zip';
 
   sherpa_onnx.OfflineTts? _tts;
   bool _isInitialized = false;
@@ -43,19 +42,17 @@ class TtsService {
       final modelPaths = await _copyAssetsToLocal();
       assetStopwatch.stop();
       
-      // Create the Kokoro model configuration optimized for speed
       modelLoadStopwatch.start();
-      final kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
+      final vits = sherpa_onnx.OfflineTtsVitsModelConfig(
         model: modelPaths['model']!,
-        voices: modelPaths['voices']!,
         tokens: modelPaths['tokens']!,
         dataDir: modelPaths['dataDir']!,
-        lengthScale: 0.8, // Slightly faster speed for lower latency
+        lengthScale: 1.0, // Slightly faster speed for lower latency
       );
 
       // Create the model configuration optimized for speed
       final modelConfig = sherpa_onnx.OfflineTtsModelConfig(
-        kokoro: kokoro,
+        vits: vits,
         numThreads: 4, // Use more threads for faster processing
         debug: false,
       );
@@ -122,8 +119,7 @@ class TtsService {
       // Copy individual files
       final filesToCopy = {
         'model': _modelAssetPath,
-        'tokens': _tokensAssetPath,
-        'voices': _voicesAssetPath,
+        'tokens': _tokensAssetPath
       };
 
       for (final entry in filesToCopy.entries) {
@@ -392,9 +388,8 @@ class TtsService {
 
   /// Get available speaker IDs (for multi-speaker models)
   List<int> getAvailableSpeakers() {
-    // Kokoro typically supports multiple speakers
     // This is a placeholder - you might want to make this configurable
-    return List.generate(10, (index) => index); // Speakers 0-9
+    return List.generate(1, (index) => index); // Speakers 0-9
   }
 
   /// Check if the service is ready to use

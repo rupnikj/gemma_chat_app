@@ -76,6 +76,9 @@ flutter:
    - assets/kokoro-int8-en-v0_19/tokens.txt
    - assets/kokoro-int8-en-v0_19/voices.bin
    - assets/kokoro-int8-en-v0_19/espeak-ng-data.zip
+   - assets/vits-piper-en_US-glados/en_US-glados.onnx
+   - assets/vits-piper-en_US-glados/tokens.txt
+   - assets/vits-piper-en_US-glados/espeak-ng-data.zip
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
