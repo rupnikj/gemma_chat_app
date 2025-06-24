@@ -6,12 +6,13 @@ import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:archive/archive.dart';
 
 class TtsService {
   static const String _modelAssetPath = 'assets/kokoro-int8-en-v0_19/model.int8.onnx';
   static const String _tokensAssetPath = 'assets/kokoro-int8-en-v0_19/tokens.txt';
   static const String _voicesAssetPath = 'assets/kokoro-int8-en-v0_19/voices.bin';
-  static const String _dataDirAssetPath = 'assets/kokoro-int8-en-v0_19/espeak-ng-data/';
+  static const String _espeakDataArchivePath = 'assets/kokoro-int8-en-v0_19/espeak-ng-data.zip';
 
   sherpa_onnx.OfflineTts? _tts;
   bool _isInitialized = false;
@@ -124,13 +125,9 @@ class TtsService {
         localPaths[assetKey] = localPath;
       }
 
-      // Copy espeak-ng-data directory
+      // Extract espeak-ng-data from compressed archive
       final dataDirPath = path.join(modelsDir.path, 'espeak-ng-data');
-      final dataDirLocal = Directory(dataDirPath);
-      if (!await dataDirLocal.exists()) {
-        await dataDirLocal.create(recursive: true);
-        await _copyAssetDirectory(_dataDirAssetPath, dataDirPath);
-      }
+      await _extractEspeakDataArchive(dataDirPath);
       localPaths['dataDir'] = dataDirPath;
 
       return localPaths;
@@ -140,49 +137,94 @@ class TtsService {
     }
   }
 
-  /// Copy an entire asset directory to local storage
-  Future<void> _copyAssetDirectory(String assetDirPath, String localDirPath) async {
+  /// Extract espeak-ng-data from compressed archive
+  Future<void> _extractEspeakDataArchive(String extractPath) async {
     try {
-      // Get the asset manifest to find all files in the espeak-ng-data directory
-      final manifestContent = await rootBundle.loadString('AssetManifest.json');
-      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
-
-      // Find all assets that start with our asset directory path
-      final assetFiles = manifestMap.keys
-          .where((String key) => key.startsWith(assetDirPath))
-          .where((String key) => !key.endsWith('/')) // Skip directories
-          .toList();
-
-      debugPrint('[TtsService] Found ${assetFiles.length} files in $assetDirPath');
-
-      // Copy each file
-      for (final assetPath in assetFiles) {
-        final relativePath = assetPath.substring(assetDirPath.length);
-        final localFilePath = path.join(localDirPath, relativePath);
+      final extractDir = Directory(extractPath);
+      
+      // Check if already extracted by looking for key files
+      if (await extractDir.exists()) {
+        final phonDataFile = File(path.join(extractPath, 'phondata'));
+        final voicesDir = Directory(path.join(extractPath, 'voices'));
+        final langDir = Directory(path.join(extractPath, 'lang'));
         
-        // Create directory if needed
-        final localFile = File(localFilePath);
-        await localFile.parent.create(recursive: true);
-        
-        // Copy file if it doesn't exist
-        if (!await localFile.exists()) {
+        if (await phonDataFile.exists() && await voicesDir.exists() && await langDir.exists()) {
+          debugPrint('[TtsService] espeak-ng-data already extracted at $extractPath');
+          return;
+        }
+      }
+      
+      // Create extraction directory
+      await extractDir.create(recursive: true);
+      
+      debugPrint('[TtsService] Extracting espeak-ng-data archive...');
+      
+      // Load the compressed archive from assets
+      final byteData = await rootBundle.load(_espeakDataArchivePath);
+      final bytes = byteData.buffer.asUint8List();
+      
+      debugPrint('[TtsService] Archive size: ${bytes.length} bytes');
+      
+      // Try to decompress the archive (try different formats)
+      Archive archive;
+      try {
+        // First try as zip (most reliable with Flutter assets)
+        archive = ZipDecoder().decodeBytes(bytes);
+        debugPrint('[TtsService] Successfully decoded as zip');
+      } catch (e) {
+        debugPrint('[TtsService] Failed to decode as zip: $e');
+        try {
+          // Try as tar.gz
+          archive = TarDecoder().decodeBytes(GZipDecoder().decodeBytes(bytes));
+          debugPrint('[TtsService] Successfully decoded as tar.gz');
+        } catch (e2) {
+          debugPrint('[TtsService] Failed to decode as tar.gz: $e2');
           try {
-            final byteData = await rootBundle.load(assetPath);
-            final bytes = byteData.buffer.asUint8List();
-            await localFile.writeAsBytes(bytes);
-            debugPrint('[TtsService] Copied $assetPath to $localFilePath');
-          } catch (e) {
-            debugPrint('[TtsService] Warning: Could not copy $assetPath: $e');
-            // Continue with other files
+            // Try as plain tar
+            archive = TarDecoder().decodeBytes(bytes);
+            debugPrint('[TtsService] Successfully decoded as plain tar');
+          } catch (e3) {
+            debugPrint('[TtsService] Failed all archive formats: zip($e), tar.gz($e2), tar($e3)');
+            rethrow;
           }
         }
       }
       
-      debugPrint('[TtsService] Completed copying espeak-ng-data directory to $localDirPath');
+      // Extract all files
+      int extractedCount = 0;
+      for (final file in archive) {
+        // Strip the top-level 'espeak-ng-data/' directory from the path
+        String relativePath = file.name;
+        if (relativePath.startsWith('espeak-ng-data/')) {
+          relativePath = relativePath.substring('espeak-ng-data/'.length);
+        }
+        
+        // Skip if the path is empty (this would be the top-level directory itself)
+        if (relativePath.isEmpty) {
+          continue;
+        }
+        
+        final filePath = path.join(extractPath, relativePath);
+        
+        if (file.isFile) {
+          final localFile = File(filePath);
+          await localFile.parent.create(recursive: true);
+          await localFile.writeAsBytes(file.content);
+          extractedCount++;
+        } else {
+          // Create directory
+          final dir = Directory(filePath);
+          if (!await dir.exists()) {
+            await dir.create(recursive: true);
+          }
+        }
+      }
+      
+      debugPrint('[TtsService] Successfully extracted $extractedCount files from espeak-ng-data archive to $extractPath');
       
     } catch (e) {
-      debugPrint('[TtsService] Warning: Could not copy espeak-ng-data directory: $e');
-      // Continue anyway as some TTS models might work without this data
+      debugPrint('[TtsService] Failed to extract espeak-ng-data archive: $e');
+      rethrow;
     }
   }
 
