@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:gemma_chat_app/services/chat_service.dart';
 import 'package:gemma_chat_app/services/asr_service.dart';
 import 'package:gemma_chat_app/services/tts_service_vits.dart';
+import 'package:gemma_chat_app/services/streaming_tts_service.dart';
 import 'package:gemma_chat_app/screens/settings_screen.dart';
 import 'package:flutter_gemma/flutter_gemma.dart'; // For Message class
 import 'package:record/record.dart';
@@ -13,6 +14,18 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:audioplayers/audioplayers.dart';
+
+class Message {
+  final String text;
+  final bool isUser;
+  final String id; // Unique identifier for each message
+
+  Message({
+    required this.text, 
+    required this.isUser,
+    String? id,
+  }) : id = id ?? DateTime.now().millisecondsSinceEpoch.toString();
+}
 
 void main() {
   // Ensure Flutter bindings are initialized
@@ -70,6 +83,7 @@ class _ChatScreenState extends State<ChatScreen> {
   late ChatService _chatService;
   late AsrService _asrService;
   late TtsService _ttsService;
+  late StreamingTtsService _streamingTtsService;
   
   // Recording state
   bool _isRecording = false;
@@ -82,6 +96,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _chatService = Provider.of<ChatService>(context, listen: false);
     _asrService = AsrService();
     _ttsService = TtsService();
+    _streamingTtsService = StreamingTtsService(_ttsService, _audioPlayer);
 
     // Listen to model readiness and path changes to rebuild UI
     _chatService.isModelReady.addListener(_onModelStateChanged);
@@ -93,6 +108,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _initializeChatService();
     _initializeAsrService();
     _initializeTtsService();
+    _initializeStreamingTtsService();
   }
 
   // Handle scroll events to detect manual scrolling
@@ -189,6 +205,23 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _initializeStreamingTtsService() async {
+    try {
+      await _streamingTtsService.initialize();
+      print("Streaming TTS Service initialized successfully");
+    } catch (e) {
+      print("Error initializing Streaming TTS Service: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Streaming TTS initialization failed: ${e.toString()}'),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
   void _onModelStateChanged() {
     if (mounted) {
       setState(() {
@@ -216,6 +249,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _audioPlayer.dispose();
     _asrService.dispose();
     _ttsService.dispose();
+    _streamingTtsService.dispose();
     super.dispose();
   }
 
@@ -298,45 +332,66 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       final stream = _chatService.sendMessage(text);
       bool receivedToken = false;
-      await for (final token in stream) {
-        receivedToken = true;
-        if (mounted) {
-          setState(() {
-            // Update the last message (AI's response)
-            _messages.last = Message(
-              text: _messages.last.text + token,
-              isUser: false,
-            );
-            print(
-              "[ChatScreen] _handleSendMessage: Stream token received: '$token'",
-            );
-          });
-          // Use jumpTo for smoother experience during token streaming
-          WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+      
+      // Create a broadcast stream for both UI updates and TTS
+      final broadcastController = StreamController<String>.broadcast();
+      
+      // Start streaming TTS with the broadcast stream
+      if (_streamingTtsService.isReady) {
+        print("[ChatScreen] _handleSendMessage: Starting streaming TTS");
+        _streamingTtsService.startStreaming(
+          broadcastController.stream, 
+          speed: 1.3, 
+          speakerId: 0,
+          messageId: aiPlaceholderMessage.id, // Pass the AI message ID
+        ).catchError((e) {
+          print("Error with streaming TTS: $e");
+        });
+      }
+      
+      // Listen to the original stream and broadcast to both UI and TTS
+      try {
+        await for (final token in stream) {
+          receivedToken = true;
+          
+          // Broadcast token to TTS stream
+          broadcastController.add(token);
+          
+          if (mounted) {
+            setState(() {
+              // Update the last message (AI's response) while preserving the original ID
+              final currentMessage = _messages.last;
+              _messages.last = Message(
+                text: currentMessage.text + token,
+                isUser: false,
+                id: currentMessage.id, // Preserve the original message ID
+              );
+              print(
+                "[ChatScreen] _handleSendMessage: Stream token received: '$token'",
+              );
+            });
+            // Use jumpTo for smoother experience during token streaming
+            WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+          }
         }
+      } finally {
+        // Close the broadcast stream when done
+        await broadcastController.close();
       }
       if (!receivedToken) {
         print(
           "[ChatScreen] _handleSendMessage: Stream completed without emitting any tokens.",
         );
-      } else {
-        // Automatically play TTS for the AI response when generation is complete
-        final aiResponse = _messages.last.text.trim();
-        if (aiResponse.isNotEmpty && _ttsService.isReady) {
-          print("[ChatScreen] _handleSendMessage: Auto-playing TTS for AI response");
-          // Use fast first sentence generation for immediate feedback
-          _handlePlayTtsFast(aiResponse).catchError((e) {
-            print("Error auto-playing TTS: $e");
-          });
-        }
       }
     } catch (e) {
       print("[ChatScreen] _handleSendMessage: Error sending message - $e");
       if (mounted) {
         setState(() {
+          final currentMessage = _messages.last;
           _messages.last = Message(
             text: "Error: ${e.toString()}",
             isUser: false,
+            id: currentMessage.id, // Preserve the original message ID
           );
         });
         ScaffoldMessenger.of(context).showSnackBar(
@@ -400,8 +455,12 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _handleStopGeneration() async {
     print("[ChatScreen] _handleStopGeneration: Called");
     try {
-      await _chatService.stopGeneration();
-      print("[ChatScreen] _handleStopGeneration: Generation stopped successfully");
+      // Stop both LLM generation and streaming TTS
+      await Future.wait([
+        _chatService.stopGeneration(),
+        _streamingTtsService.stopStreaming(),
+      ]);
+      print("[ChatScreen] _handleStopGeneration: Generation and streaming TTS stopped successfully");
       
     } catch (e) {
       print("[ChatScreen] _handleStopGeneration: Error stopping generation - $e");
@@ -601,44 +660,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _handlePlayTtsFast(String text) async {
-    if (!_ttsService.isReady) {
-      return; // Fail silently for auto-play
-    }
 
-    try {
-      // Generate a temporary file path for the audio
-      final tempDir = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final audioPath = path.join(tempDir.path, 'tts_fast_$timestamp.wav');
-
-      await _ttsService.generateSpeechToFile(
-        text: text,
-        outputPath: audioPath,
-        speed: 1.3, // Even faster for immediate response
-        speakerId: 0,
-      );
-
-      // Play the audio file
-      await _audioPlayer.play(DeviceFileSource(audioPath));
-
-      print("TTS Fast: Generated and playing first sentence for immediate feedback");
-
-      // Clean up the temporary file after the audio finishes playing
-      late StreamSubscription subscription;
-      subscription = _audioPlayer.onPlayerComplete.listen((_) async {
-        final file = File(audioPath);
-        if (await file.exists()) {
-          await file.delete();
-        }
-        subscription.cancel();
-      });
-
-    } catch (e) {
-      print("Error with fast TTS generation: $e");
-      // Fail silently for auto-play to avoid disrupting user experience
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -728,6 +750,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     message: message,
                     onPlayTts: message.isUser ? null : () => _handlePlayTts(message.text),
                     ttsService: _ttsService,
+                    streamingTtsService: _streamingTtsService,
                   );
                 },
               ),
@@ -843,11 +866,13 @@ class _ChatMessageBubble extends StatelessWidget {
   final Message message;
   final VoidCallback? onPlayTts;
   final TtsService ttsService;
+  final StreamingTtsService streamingTtsService;
 
   const _ChatMessageBubble({
     required this.message,
     this.onPlayTts,
     required this.ttsService,
+    required this.streamingTtsService,
   });
 
   @override
@@ -877,37 +902,95 @@ class _ChatMessageBubble extends StatelessWidget {
                         : Theme.of(context).colorScheme.onSecondaryContainer,
               ),
             ),
-            if (!message.isUser && message.text.isNotEmpty && onPlayTts != null)
+            if (!message.isUser && message.text.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8.0),
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: ValueListenableBuilder<bool>(
-                    valueListenable: ttsService.isProcessing,
-                    builder: (context, isProcessing, child) {
-                      return IconButton(
-                        onPressed: isProcessing ? null : onPlayTts,
-                        icon: isProcessing
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.play_arrow),
-                        iconSize: 20,
-                        padding: const EdgeInsets.all(4),
-                        constraints: const BoxConstraints(
-                          minWidth: 28,
-                          minHeight: 28,
-                        ),
-                        style: IconButton.styleFrom(
-                          backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.1),
-                          foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
-                        ),
-                        tooltip: 'Play speech',
-                      );
-                    },
-                  ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    // Streaming TTS status indicator - only show for the active message
+                    ValueListenableBuilder<String?>(
+                      valueListenable: streamingTtsService.activeMessageId,
+                      builder: (context, activeMessageId, child) {
+                        // Only show indicator if this message is the active one
+                        if (activeMessageId != message.id) return const SizedBox.shrink();
+                        
+                        return ValueListenableBuilder<bool>(
+                          valueListenable: streamingTtsService.isStreaming,
+                          builder: (context, isStreaming, child) {
+                            if (!isStreaming) return const SizedBox.shrink();
+                            return ValueListenableBuilder<bool>(
+                              valueListenable: streamingTtsService.isPlayingAudio,
+                              builder: (context, isPlaying, child) {
+                                return Container(
+                                  margin: const EdgeInsets.only(right: 8.0),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                                  decoration: BoxDecoration(
+                                    color: isPlaying ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: isPlaying ? Colors.green : Colors.orange,
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      SizedBox(
+                                        width: 12,
+                                        height: 12,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: isPlaying ? Colors.green : Colors.orange,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        isPlaying ? 'Speaking' : 'Generating',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          color: isPlaying ? Colors.green : Colors.orange,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            );
+                          },
+                        );
+                      },
+                    ),
+                    // Manual TTS play button
+                    if (onPlayTts != null)
+                      ValueListenableBuilder<bool>(
+                        valueListenable: ttsService.isProcessing,
+                        builder: (context, isProcessing, child) {
+                          return IconButton(
+                            onPressed: isProcessing ? null : onPlayTts,
+                            icon: isProcessing
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.play_arrow),
+                            iconSize: 20,
+                            padding: const EdgeInsets.all(4),
+                            constraints: const BoxConstraints(
+                              minWidth: 28,
+                              minHeight: 28,
+                            ),
+                            style: IconButton.styleFrom(
+                              backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.1),
+                              foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
+                            ),
+                            tooltip: 'Play speech',
+                          );
+                        },
+                      ),
+                  ],
                 ),
               ),
           ],
