@@ -908,85 +908,61 @@ class _ChatMessageBubble extends StatelessWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    // Streaming TTS status indicator - only show for the active message
-                    ValueListenableBuilder<String?>(
-                      valueListenable: streamingTtsService.activeMessageId,
-                      builder: (context, activeMessageId, child) {
-                        // Only show indicator if this message is the active one
-                        if (activeMessageId != message.id) return const SizedBox.shrink();
-                        
-                        return ValueListenableBuilder<bool>(
-                          valueListenable: streamingTtsService.isStreaming,
-                          builder: (context, isStreaming, child) {
-                            if (!isStreaming) return const SizedBox.shrink();
-                            return ValueListenableBuilder<bool>(
-                              valueListenable: streamingTtsService.isPlayingAudio,
-                              builder: (context, isPlaying, child) {
-                                return Container(
-                                  margin: const EdgeInsets.only(right: 8.0),
-                                  padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
-                                  decoration: BoxDecoration(
-                                    color: isPlaying ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: isPlaying ? Colors.green : Colors.orange,
-                                      width: 1,
-                                    ),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      SizedBox(
-                                        width: 12,
-                                        height: 12,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: isPlaying ? Colors.green : Colors.orange,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        isPlaying ? 'Speaking' : 'Generating',
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          color: isPlaying ? Colors.green : Colors.orange,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            );
-                          },
-                        );
-                      },
-                    ),
-                    // Manual TTS play button
+                    // Manual TTS play button - shows stop button when streaming TTS is active
                     if (onPlayTts != null)
-                      ValueListenableBuilder<bool>(
-                        valueListenable: ttsService.isProcessing,
-                        builder: (context, isProcessing, child) {
-                          return IconButton(
-                            onPressed: isProcessing ? null : onPlayTts,
-                            icon: isProcessing
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.play_arrow),
-                            iconSize: 20,
-                            padding: const EdgeInsets.all(4),
-                            constraints: const BoxConstraints(
-                              minWidth: 28,
-                              minHeight: 28,
-                            ),
-                            style: IconButton.styleFrom(
-                              backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.1),
-                              foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
-                            ),
-                            tooltip: 'Play speech',
+                      ValueListenableBuilder<String?>(
+                        valueListenable: streamingTtsService.activeMessageId,
+                        builder: (context, activeMessageId, child) {
+                          final isActiveMessage = activeMessageId == message.id;
+                          
+                          return ValueListenableBuilder<bool>(
+                            valueListenable: streamingTtsService.isStreaming,
+                            builder: (context, isStreaming, child) {
+                              final showStopButton = isActiveMessage && isStreaming;
+                              
+                              return ValueListenableBuilder<bool>(
+                                valueListenable: ttsService.isProcessing,
+                                builder: (context, isProcessing, child) {
+                                  // Determine button state
+                                  final isDisabled = isProcessing || (isStreaming && !isActiveMessage);
+                                  
+                                  return IconButton(
+                                    onPressed: isDisabled 
+                                        ? null 
+                                        : showStopButton 
+                                            ? () async {
+                                                // Stop streaming TTS
+                                                await streamingTtsService.stopStreaming();
+                                              }
+                                            : onPlayTts,
+                                    icon: isProcessing
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(strokeWidth: 2),
+                                          )
+                                        : showStopButton
+                                            ? const Icon(Icons.stop)
+                                            : const Icon(Icons.play_arrow),
+                                    iconSize: 20,
+                                    padding: const EdgeInsets.all(4),
+                                    constraints: const BoxConstraints(
+                                      minWidth: 28,
+                                      minHeight: 28,
+                                    ),
+                                    style: IconButton.styleFrom(
+                                      backgroundColor: showStopButton 
+                                          ? Colors.red.withOpacity(0.1)
+                                          : Theme.of(context).colorScheme.surface.withOpacity(0.1),
+                                      foregroundColor: showStopButton 
+                                          ? Colors.red 
+                                          : Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
+                                    ),
+                                    tooltip: showStopButton ? 'Stop speech' : 'Play speech',
+                                  );
+                                },
+                              );
+                            },
                           );
                         },
                       ),
