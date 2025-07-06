@@ -101,6 +101,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // Listen to model readiness and path changes to rebuild UI
     _chatService.isModelReady.addListener(_onModelStateChanged);
     _chatService.currentModelPath.addListener(_onModelStateChanged);
+    _chatService.historyVersion.addListener(_onHistoryChanged);
 
     // Add scroll listener to detect manual scrolling
     _scrollController.addListener(_onScroll);
@@ -238,6 +239,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _onHistoryChanged() {
+    if (mounted) {
+      setState(() {
+        // Refresh messages when history version changes (after edits)
+        if (_chatService.isModelReady.value) {
+          final history = _chatService.getChatHistory();
+          _messages = List<Message>.from(history);
+          print("[ChatScreen] History updated, refreshing UI with ${_messages.length} messages");
+        }
+      });
+    }
+  }
+
   @override
   void dispose() {
     _textController.dispose();
@@ -245,6 +259,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.dispose();
     _chatService.isModelReady.removeListener(_onModelStateChanged);
     _chatService.currentModelPath.removeListener(_onModelStateChanged);
+    _chatService.historyVersion.removeListener(_onHistoryChanged);
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     _asrService.dispose();
@@ -468,6 +483,34 @@ class _ChatScreenState extends State<ChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error stopping generation: ${e.toString()}'),
+            behavior: SnackBarBehavior.fixed,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleEditMessage(int messageIndex, String newText) async {
+    try {
+      // Edit message in the chat service
+      await _chatService.editMessageByIndex(messageIndex, newText);
+      
+      // Update the local messages list
+      setState(() {
+        _messages[messageIndex] = Message(
+          text: newText,
+          isUser: _messages[messageIndex].isUser,
+          id: _messages[messageIndex].id, // Keep the same ID for UI consistency
+        );
+      });
+      
+      print("[ChatScreen] Message at index $messageIndex edited successfully");
+    } catch (e) {
+      print("[ChatScreen] Error editing message: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error editing message: ${e.toString()}'),
             behavior: SnackBarBehavior.fixed,
           ),
         );
@@ -748,7 +791,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   final message = _messages[index];
                   return _ChatMessageBubble(
                     message: message,
+                    messageIndex: index,
                     onPlayTts: message.isUser ? null : () => _handlePlayTts(message.text),
+                    onEditMessage: _handleEditMessage,
                     ttsService: _ttsService,
                     streamingTtsService: _streamingTtsService,
                   );
@@ -862,29 +907,77 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-class _ChatMessageBubble extends StatelessWidget {
+class _ChatMessageBubble extends StatefulWidget {
   final Message message;
+  final int messageIndex;
   final VoidCallback? onPlayTts;
+  final Function(int, String) onEditMessage;
   final TtsService ttsService;
   final StreamingTtsService streamingTtsService;
 
   const _ChatMessageBubble({
     required this.message,
+    required this.messageIndex,
     this.onPlayTts,
+    required this.onEditMessage,
     required this.ttsService,
     required this.streamingTtsService,
   });
 
   @override
+  State<_ChatMessageBubble> createState() => _ChatMessageBubbleState();
+}
+
+class _ChatMessageBubbleState extends State<_ChatMessageBubble> {
+  bool _isEditing = false;
+  late TextEditingController _editController;
+
+  @override
+  void initState() {
+    super.initState();
+    _editController = TextEditingController(text: widget.message.text);
+  }
+
+  @override
+  void dispose() {
+    _editController.dispose();
+    super.dispose();
+  }
+
+  void _startEditing() {
+    setState(() {
+      _isEditing = true;
+      _editController.text = widget.message.text;
+    });
+  }
+
+  void _cancelEditing() {
+    setState(() {
+      _isEditing = false;
+      _editController.text = widget.message.text; // Reset to original text
+    });
+  }
+
+  void _acceptEdit() {
+    final newText = _editController.text.trim();
+    if (newText.isNotEmpty) {
+      widget.onEditMessage(widget.messageIndex, newText);
+      setState(() {
+        _isEditing = false;
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Align(
-      alignment: message.isUser ? Alignment.centerRight : Alignment.centerLeft,
+      alignment: widget.message.isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 8.0),
         padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
         decoration: BoxDecoration(
           color:
-              message.isUser
+              widget.message.isUser
                   ? Theme.of(context).colorScheme.primary
                   : Theme.of(context).colorScheme.secondaryContainer,
           borderRadius: BorderRadius.circular(16.0),
@@ -893,35 +986,132 @@ class _ChatMessageBubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              message.text,
-              style: TextStyle(
-                color:
-                    message.isUser
-                        ? Theme.of(context).colorScheme.onPrimary
-                        : Theme.of(context).colorScheme.onSecondaryContainer,
+            if (_isEditing) ...[
+              // Editing mode
+              TextField(
+                controller: _editController,
+                maxLines: null,
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                ),
+                style: TextStyle(
+                  color:
+                      widget.message.isUser
+                          ? Theme.of(context).colorScheme.onPrimary
+                          : Theme.of(context).colorScheme.onSecondaryContainer,
+                ),
+                autofocus: true,
               ),
-            ),
-            if (!message.isUser && message.text.isNotEmpty)
+              const SizedBox(height: 8.0),
+              // Edit control buttons
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    onPressed: _cancelEditing,
+                    icon: const Icon(Icons.close),
+                    iconSize: 20,
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
+                    ),
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.red.withOpacity(0.1),
+                      foregroundColor: Colors.red,
+                    ),
+                    tooltip: 'Cancel editing',
+                  ),
+                  const SizedBox(width: 8.0),
+                  IconButton(
+                    onPressed: () {
+                      _editController.clear();
+                    },
+                    icon: const Icon(Icons.clear),
+                    iconSize: 20,
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
+                    ),
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.orange.withOpacity(0.1),
+                      foregroundColor: Colors.orange,
+                    ),
+                    tooltip: 'Clear text',
+                  ),
+                  const SizedBox(width: 8.0),
+                  IconButton(
+                    onPressed: _acceptEdit,
+                    icon: const Icon(Icons.check),
+                    iconSize: 20,
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
+                    ),
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.green.withOpacity(0.1),
+                      foregroundColor: Colors.green,
+                    ),
+                    tooltip: 'Accept edit',
+                  ),
+                ],
+              ),
+            ] else ...[
+              // Display mode
+              Text(
+                widget.message.text,
+                style: TextStyle(
+                  color:
+                      widget.message.isUser
+                          ? Theme.of(context).colorScheme.onPrimary
+                          : Theme.of(context).colorScheme.onSecondaryContainer,
+                ),
+              ),
+              // Action buttons row
               Padding(
                 padding: const EdgeInsets.only(top: 8.0),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Manual TTS play button - shows stop button when streaming TTS is active
-                    if (onPlayTts != null)
+                    // Edit button - always show for both user and assistant messages
+                    IconButton(
+                      onPressed: _startEditing,
+                      icon: const Icon(Icons.edit),
+                      iconSize: 20,
+                      padding: const EdgeInsets.all(4),
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.1),
+                        foregroundColor: widget.message.isUser
+                            ? Theme.of(context).colorScheme.onPrimary.withOpacity(0.7)
+                            : Theme.of(context).colorScheme.onSecondaryContainer.withOpacity(0.7),
+                      ),
+                      tooltip: 'Edit message',
+                    ),
+                    // TTS play button - only for assistant messages
+                    if (!widget.message.isUser && widget.message.text.isNotEmpty && widget.onPlayTts != null) ...[
+                      const SizedBox(width: 8.0),
                       ValueListenableBuilder<String?>(
-                        valueListenable: streamingTtsService.activeMessageId,
+                        valueListenable: widget.streamingTtsService.activeMessageId,
                         builder: (context, activeMessageId, child) {
-                          final isActiveMessage = activeMessageId == message.id;
+                          final isActiveMessage = activeMessageId == widget.message.id;
                           
                           return ValueListenableBuilder<bool>(
-                            valueListenable: streamingTtsService.isStreaming,
+                            valueListenable: widget.streamingTtsService.isStreaming,
                             builder: (context, isStreaming, child) {
                               final showStopButton = isActiveMessage && isStreaming;
                               
                               return ValueListenableBuilder<bool>(
-                                valueListenable: ttsService.isProcessing,
+                                valueListenable: widget.ttsService.isProcessing,
                                 builder: (context, isProcessing, child) {
                                   // Determine button state
                                   final isDisabled = isProcessing || (isStreaming && !isActiveMessage);
@@ -932,9 +1122,9 @@ class _ChatMessageBubble extends StatelessWidget {
                                         : showStopButton 
                                             ? () async {
                                                 // Stop streaming TTS
-                                                await streamingTtsService.stopStreaming();
+                                                await widget.streamingTtsService.stopStreaming();
                                               }
-                                            : onPlayTts,
+                                            : widget.onPlayTts,
                                     icon: isProcessing
                                         ? const SizedBox(
                                             width: 16,
@@ -966,9 +1156,11 @@ class _ChatMessageBubble extends StatelessWidget {
                           );
                         },
                       ),
+                    ],
                   ],
                 ),
               ),
+            ],
           ],
         ),
       ),

@@ -31,6 +31,7 @@ class ChatService {
   final ValueNotifier<bool> isModelReady = ValueNotifier<bool>(false);
   final ValueNotifier<String?> currentModelPath = ValueNotifier<String?>(null);
   final ValueNotifier<bool> isGenerating = ValueNotifier<bool>(false);
+  final ValueNotifier<int> historyVersion = ValueNotifier<int>(0); // To trigger UI updates when history changes
 
   // Configuration ValueNotifiers
   final ValueNotifier<int> maxTokens = ValueNotifier<int>(_defaultMaxTokens);
@@ -248,6 +249,51 @@ class ChatService {
     }
   }
 
+  Future<void> _recreateChatWithHistory(List<Message> history) async {
+    if (_inferenceModel == null) {
+      print("Cannot recreate chat: InferenceModel is null.");
+      return;
+    }
+
+    // If there's an existing chat session, close it before creating a new one.
+    if (_chat != null) {
+      print("Closing existing chat session before recreating with history...");
+      try {
+        await _chat!.session.close();
+        print("Existing chat session closed successfully.");
+      } catch (e) {
+        print("Error closing existing chat session: $e");
+      }
+    }
+
+    print('Recreating chat with history (${history.length} messages)...');
+    try {
+      final currentSeed =
+          useFixedRandomSeed.value
+              ? (randomSeed.value ?? _defaultRandomSeed)
+              : Random().nextInt(1 << 30); // Generate a random int if not fixed
+
+      _chat = await _inferenceModel!.createChat(
+        temperature: temperature.value,
+        topK: topK.value,
+        topP: topP.value,
+        randomSeed: currentSeed,
+      );
+
+      // Add each message back to the chat history
+      for (final message in history) {
+        await _chat!.addQueryChunk(message);
+      }
+
+      print(
+        'Chat recreated with history successfully. Messages: ${history.length}, Seed: $currentSeed',
+      );
+    } catch (e) {
+      print("Error during _recreateChatWithHistory: $e");
+      rethrow;
+    }
+  }
+
   Future<void> pickAndLoadModel({
     ModelType modelType = ModelType.gemmaIt,
     PreferredBackend? preferredBackend,
@@ -387,6 +433,10 @@ class ChatService {
       final message = Message(text: text, isUser: true);
       await _chat!.addQueryChunk(message);
       
+      // Debug print after adding user message
+      print('User message added to chat history');
+      debugPrintHistory();
+      
       // Start the generation stream
       final responseStream = _chat!.generateChatResponseAsync();
       
@@ -491,6 +541,100 @@ class ChatService {
 
   /// Check if generation is currently in progress
   bool get isCurrentlyGenerating => _isGenerating;
+
+  /// Edit a message in the chat history by index
+  Future<void> editMessageByIndex(int messageIndex, String newText) async {
+    if (_chat == null) {
+      throw Exception("Chat session not initialized.");
+    }
+
+    // Get the current history
+    final currentHistory = _chat!.fullHistory;
+    
+    // Debug print the history before editing
+    debugPrintHistory();
+    
+    if (messageIndex < 0 || messageIndex >= currentHistory.length) {
+      throw Exception("Message index $messageIndex is out of bounds. History has ${currentHistory.length} messages.");
+    }
+    
+    final messageToEdit = currentHistory[messageIndex];
+    print('Editing message at index $messageIndex: "${messageToEdit.text}" -> "$newText"');
+    
+    // Create a new modifiable list with the edited message
+    final newHistory = <Message>[];
+    for (int i = 0; i < currentHistory.length; i++) {
+      if (i == messageIndex) {
+        // Create a new message with the edited text but preserve other properties
+        newHistory.add(Message(
+          text: newText,
+          isUser: messageToEdit.isUser,
+        ));
+      } else {
+        // Keep the original message
+        newHistory.add(currentHistory[i]);
+      }
+    }
+    
+    // Recreate the chat session with the new history
+    await _recreateChatWithHistory(newHistory);
+    
+    // Trigger UI update by incrementing history version
+    historyVersion.value++;
+    
+    // Debug print the history after editing
+    print('Message edited successfully');
+    debugPrintHistory();
+  }
+
+  /// Debug print the entire chat history with raw message data
+  void debugPrintHistory() {
+    final history = _chat?.fullHistory ?? [];
+    print('=== CHAT HISTORY DEBUG ===');
+    print('Total messages: ${history.length}');
+    
+    for (int i = 0; i < history.length; i++) {
+      final message = history[i];
+      print('[$i] User: ${message.isUser}');
+      print('    Text: "${message.text}"');
+      print('    ---');
+    }
+    print('=== END CHAT HISTORY ===');
+  }
+
+  /// Delete a message from the chat history by index
+  Future<void> deleteMessageByIndex(int messageIndex) async {
+    if (_chat == null) {
+      throw Exception("Chat session not initialized.");
+    }
+
+    // Get the current history
+    final currentHistory = _chat!.fullHistory;
+    
+    // Debug print the history before deleting
+    debugPrintHistory();
+    
+    if (messageIndex < 0 || messageIndex >= currentHistory.length) {
+      throw Exception("Message index $messageIndex is out of bounds. History has ${currentHistory.length} messages.");
+    }
+    
+    print('Deleting message at index $messageIndex: "${currentHistory[messageIndex].text}"');
+    
+    // Create a new modifiable list without the deleted message
+    final newHistory = <Message>[];
+    for (int i = 0; i < currentHistory.length; i++) {
+      if (i != messageIndex) {
+        newHistory.add(currentHistory[i]);
+      }
+    }
+    
+    // Recreate the chat session with the new history
+    await _recreateChatWithHistory(newHistory);
+    
+    // Debug print the history after deleting
+    print('Message deleted successfully');
+    debugPrintHistory();
+  }
 
   Future<void> removeModel() async {
     print('Removing model...');
